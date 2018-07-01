@@ -1,6 +1,7 @@
 use byteorder::{BigEndian, ReadBytesExt};
 use failure;
-use std::io::Read;
+use std::io::{self, Read};
+use Stat;
 
 #[derive(Debug)]
 pub(crate) enum Response {
@@ -11,14 +12,39 @@ pub(crate) enum Response {
         passwd: Vec<u8>,
         read_only: bool,
     },
+    Exists {
+        stat: Stat,
+    },
+}
+
+pub trait ReadFrom: Sized {
+    fn read_from<R: Read>(read: &mut R) -> io::Result<Self>;
+}
+
+impl ReadFrom for Stat {
+    fn read_from<R: Read>(read: &mut R) -> io::Result<Stat> {
+        Ok(Stat {
+            czxid: try!(read.read_i64::<BigEndian>()),
+            mzxid: try!(read.read_i64::<BigEndian>()),
+            ctime: try!(read.read_i64::<BigEndian>()),
+            mtime: try!(read.read_i64::<BigEndian>()),
+            version: try!(read.read_i32::<BigEndian>()),
+            cversion: try!(read.read_i32::<BigEndian>()),
+            aversion: try!(read.read_i32::<BigEndian>()),
+            ephemeral_owner: try!(read.read_i64::<BigEndian>()),
+            data_length: try!(read.read_i32::<BigEndian>()),
+            num_children: try!(read.read_i32::<BigEndian>()),
+            pzxid: try!(read.read_i64::<BigEndian>()),
+        })
+    }
 }
 
 pub trait BufferReader: Read {
-    fn read_buffer(&mut self) -> Result<Vec<u8>, failure::Error>;
+    fn read_buffer(&mut self) -> io::Result<Vec<u8>>;
 }
 
 impl<R: Read> BufferReader for R {
-    fn read_buffer(&mut self) -> Result<Vec<u8>, failure::Error> {
+    fn read_buffer(&mut self) -> io::Result<Vec<u8>> {
         let len = try!(self.read_i32::<BigEndian>());
         let len = if len < 0 { 0 } else { len as usize };
         let mut buf = vec![0; len];
@@ -26,8 +52,22 @@ impl<R: Read> BufferReader for R {
         if read == len {
             Ok(buf)
         } else {
-            bail!("read_buffer failed")
+            Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "read_buffer failed",
+            ))
         }
+    }
+}
+
+trait StringReader: Read {
+    fn read_string(&mut self) -> io::Result<String>;
+}
+
+impl<R: Read> StringReader for R {
+    fn read_string(&mut self) -> io::Result<String> {
+        let raw = try!(self.read_buffer());
+        Ok(String::from_utf8(raw).unwrap())
     }
 }
 
@@ -42,6 +82,9 @@ impl Response {
                 session_id: reader.read_i64::<BigEndian>()?,
                 passwd: reader.read_buffer()?,
                 read_only: reader.read_u8()? != 0,
+            }),
+            OpCode::Exists => Ok(Response::Exists {
+                stat: Stat::read_from(&mut reader)?,
             }),
             _ => unimplemented!(),
         }

@@ -27,6 +27,38 @@ pub(super) enum OpCode {
     Error = -1,
 }
 
+pub trait WriteTo {
+    fn write_to(&self, writer: &mut Write) -> io::Result<()>;
+}
+
+impl WriteTo for u8 {
+    fn write_to(&self, writer: &mut Write) -> io::Result<()> {
+        try!(writer.write_u8(*self));
+        Ok(())
+    }
+}
+
+impl WriteTo for str {
+    fn write_to(&self, writer: &mut Write) -> io::Result<()> {
+        try!(writer.write_i32::<BigEndian>(self.len() as i32));
+        writer.write_all(self.as_ref())
+    }
+}
+
+impl<T: WriteTo> WriteTo for [T] {
+    fn write_to(&self, writer: &mut Write) -> io::Result<()> {
+        try!(writer.write_i32::<BigEndian>(self.len() as i32));
+        let mut res = Ok(());
+        for elem in self.iter() {
+            res = elem.write_to(writer);
+            if res.is_err() {
+                return res;
+            }
+        }
+        res
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum Request {
     Connect {
@@ -37,8 +69,10 @@ pub(crate) enum Request {
         passwd: Vec<u8>,
         read_only: bool,
     },
-    #[allow(dead_code)]
-    Foo,
+    Exists {
+        path: String,
+        watch: u8,
+    },
 }
 
 impl Request {
@@ -60,16 +94,20 @@ impl Request {
                 buffer.write_i32::<BigEndian>(passwd.len() as i32)?;
                 buffer.write_all(passwd)?;
                 buffer.write_u8(read_only as u8)?;
-                Ok(())
             }
-            _ => unimplemented!(),
+            Request::Exists { ref path, watch } => {
+                buffer.write_i32::<BigEndian>(OpCode::Exists as i32)?;
+                path.write_to(buffer)?;
+                buffer.write_u8(watch)?;
+            }
         }
+        Ok(())
     }
 
     pub(super) fn opcode(&self) -> OpCode {
         match *self {
             Request::Connect { .. } => OpCode::CreateSession,
-            _ => unimplemented!(),
+            Request::Exists { .. } => OpCode::Exists,
         }
     }
 }
