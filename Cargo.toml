@@ -1,0 +1,10 @@
+[package]
+name = "tokio-zookeeper"
+version = "0.1.0"
+authors = ["Jon Gjengset <jon@thesquareplanet.com>"]
+
+[dependencies]
+futures = "0.1"
+tokio = "0.1"
+failure = "0.1"
+byteorder = "1.2"
