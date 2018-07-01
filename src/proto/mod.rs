@@ -81,6 +81,7 @@ impl<S> Packetizer<S> {
                 exiting: false,
             }.map_err(|e| {
                 // TODO: expose this error to the user somehow
+                eprintln!("packetizer exiting: {:?}", e);
                 drop(e);
             }),
         );
@@ -161,7 +162,7 @@ impl<S> Packetizer<S> {
         S: AsyncRead,
     {
         loop {
-            let mut need = if self.inlen() > 4 {
+            let mut need = if self.inlen() >= 4 {
                 let length = (&mut &self.inbox[self.instart..]).read_i32::<BigEndian>()? as usize;
                 length + 4
             } else {
@@ -169,6 +170,7 @@ impl<S> Packetizer<S> {
             };
 
             while self.inlen() < need {
+                eprintln!("READ MORE BYTES, have {}", self.inlen());
                 let read_from = self.inbox.len();
                 self.inbox.resize(read_from + need, 0);
                 match self.stream.poll_read(&mut self.inbox[read_from..])? {
@@ -185,7 +187,7 @@ impl<S> Packetizer<S> {
                         }
 
                         self.inbox.truncate(read_from + n);
-                        if self.inlen() > 4 && need != 4 {
+                        if self.inlen() >= 4 && need == 4 {
                             let length = (&mut &self.inbox[self.instart..]).read_i32::<BigEndian>()?
                                 as usize;
                             need += length;
@@ -203,7 +205,6 @@ impl<S> Packetizer<S> {
                 let xid = buf.read_i32::<BigEndian>()?;
 
                 // find the waiting request future
-                eprintln!("RM");
                 let (opcode, tx) = self.reply.remove(&xid).unwrap(); // TODO: return an error if xid was unknown
                 eprintln!("handling response to xid {} with opcode {:?}", xid, opcode);
 
@@ -230,6 +231,7 @@ where
     fn poll(&mut self) -> Result<Async<Self::Item>, Self::Error> {
         eprintln!("packetizer polled");
         if !self.exiting {
+            eprintln!("poll_enqueue");
             match self.poll_enqueue() {
                 Ok(_) => {}
                 Err(()) => {
@@ -239,7 +241,9 @@ where
             }
         }
 
+        eprintln!("poll_read");
         let r = self.poll_read()?;
+        eprintln!("poll_write");
         let w = self.poll_write()?;
         match (r, w) {
             (Async::Ready(()), Async::Ready(())) if self.exiting => {

@@ -56,6 +56,7 @@ mod tests {
         let zk = rt
             .block_on(ZooKeeper::connect(&"127.0.0.1:2181".parse().unwrap()))
             .unwrap();
+        eprintln!("FOO");
         drop(zk);
         rt.shutdown_on_idle();
     }
