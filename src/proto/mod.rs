@@ -158,8 +158,6 @@ impl<S> Packetizer<S> {
             if self.outstart == self.outbox.len() {
                 self.outbox.clear();
                 self.outstart = 0;
-            } else {
-                return Ok(Async::NotReady);
             }
         }
 
