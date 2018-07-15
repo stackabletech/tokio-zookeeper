@@ -5,6 +5,7 @@ use futures::{
     sync::{mpsc, oneshot},
 };
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::{mem, time};
 use tokio;
 use tokio::prelude::*;
@@ -17,6 +18,22 @@ mod response;
 pub(crate) use self::error::ZkError;
 pub(crate) use self::request::Request;
 pub(crate) use self::response::Response;
+
+pub trait ZooKeeperTransport: AsyncRead + AsyncWrite + Sized + Send {
+    type Addr: Send;
+    type ConnectError: Into<failure::Error>;
+    type ConnectFut: Future<Item = Self, Error = Self::ConnectError> + Send + 'static;
+    fn connect(&Self::Addr) -> Self::ConnectFut;
+}
+
+impl ZooKeeperTransport for tokio::net::TcpStream {
+    type Addr = SocketAddr;
+    type ConnectError = tokio::io::Error;
+    type ConnectFut = tokio::net::ConnectFuture;
+    fn connect(addr: &Self::Addr) -> Self::ConnectFut {
+        tokio::net::TcpStream::connect(addr)
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct Enqueuer(
@@ -42,7 +59,13 @@ impl Enqueuer {
     }
 }
 
-pub(crate) struct Packetizer<S> {
+pub(crate) struct Packetizer<S>
+where
+    S: ZooKeeperTransport,
+{
+    /// ZooKeeper address
+    addr: S::Addr,
+
     /// Current state
     state: PacketizerState<S>,
 
@@ -58,29 +81,26 @@ pub(crate) struct Packetizer<S> {
     exiting: bool,
 }
 
-impl<S> Packetizer<S> {
+impl<S> Packetizer<S>
+where
+    S: ZooKeeperTransport,
+{
     /// TODO: document that it calls tokio::spawn
-    pub(crate) fn new(stream: S, default_watcher: mpsc::UnboundedSender<WatchedEvent>) -> Enqueuer
+    pub(crate) fn new(
+        addr: S::Addr,
+        stream: S,
+        default_watcher: mpsc::UnboundedSender<WatchedEvent>,
+    ) -> Enqueuer
     where
         S: Send + 'static + AsyncRead + AsyncWrite,
     {
+        // TODO: do connect directly here now that we can
         let (tx, rx) = mpsc::unbounded();
 
         tokio::spawn(
             Packetizer {
-                state: PacketizerState::Connected(ActivePacketizer {
-                    stream,
-                    timer: tokio::timer::Delay::new(
-                        time::Instant::now() + time::Duration::from_secs(86_400),
-                    ),
-                    timeout: time::Duration::new(0, 0),
-                    outbox: Vec::new(),
-                    outstart: 0,
-                    inbox: Vec::new(),
-                    instart: 0,
-                    reply: Default::default(),
-                    first: true,
-                }),
+                addr,
+                state: PacketizerState::Connected(ActivePacketizer::new(stream)),
                 xid: 0,
                 default_watcher,
                 rx: rx,
@@ -119,18 +139,73 @@ struct ActivePacketizer<S> {
     reply: HashMap<i32, (request::OpCode, oneshot::Sender<Result<Response, ZkError>>)>,
 
     first: bool,
+
+    /// Fields for re-connection
+    last_zxid_seen: i64,
+    session_id: i64,
+    password: Vec<u8>,
 }
 
 impl<S> ActivePacketizer<S>
 where
     S: AsyncRead + AsyncWrite,
 {
+    fn new(stream: S) -> Self {
+        ActivePacketizer {
+            stream,
+            timer: tokio::timer::Delay::new(
+                time::Instant::now() + time::Duration::from_secs(86_400),
+            ),
+            timeout: time::Duration::new(0, 0),
+            outbox: Vec::new(),
+            outstart: 0,
+            inbox: Vec::new(),
+            instart: 0,
+            reply: Default::default(),
+            first: true,
+
+            last_zxid_seen: 0,
+            session_id: 0,
+            password: Vec::new(),
+        }
+    }
+
     fn outlen(&self) -> usize {
         self.outbox.len() - self.outstart
     }
 
     fn inlen(&self) -> usize {
         self.inbox.len() - self.instart
+    }
+
+    fn enqueue(&mut self, xid: i32, item: Request, tx: oneshot::Sender<Result<Response, ZkError>>) {
+        let lengthi = self.outbox.len();
+        // dummy length
+        self.outbox.push(0);
+        self.outbox.push(0);
+        self.outbox.push(0);
+        self.outbox.push(0);
+
+        let old = self.reply.insert(xid, (item.opcode(), tx));
+        assert!(old.is_none());
+
+        if let Request::Connect { .. } = item {
+        } else {
+            // xid
+            self.outbox
+                .write_i32::<BigEndian>(xid)
+                .expect("Vec::write should never fail");
+        }
+
+        // type and payload
+        item.serialize_into(&mut self.outbox)
+            .expect("Vec::write should never fail");
+        // set true length
+        let written = self.outbox.len() - lengthi - 4;
+        let mut length = &mut self.outbox[lengthi..lengthi + 4];
+        length
+            .write_i32::<BigEndian>(written as i32)
+            .expect("Vec::write should never fail");
     }
 
     fn poll_write(&mut self, exiting: bool) -> Result<Async<()>, failure::Error>
@@ -222,7 +297,14 @@ where
                     0
                 } else {
                     let xid = buf.read_i32::<BigEndian>()?;
-                    let _zxid = buf.read_i64::<BigEndian>()?;
+                    let zxid = buf.read_i64::<BigEndian>()?;
+                    if zxid != -1 {
+                        eprintln!("{} {}", zxid, self.last_zxid_seen);
+                        assert!(zxid >= self.last_zxid_seen);
+                        self.last_zxid_seen = zxid;
+                    } else {
+                        assert!(xid == -1, "only watch events should not have zxid");
+                    }
                     let errcode = buf.read_i32::<BigEndian>()?;
                     if errcode != 0 {
                         err = Some(error::ZkError::from(errcode));
@@ -263,12 +345,22 @@ where
                     if let Some(e) = err {
                         tx.send(Err(e)).is_ok();
                     } else {
-                        let r = Response::parse(opcode, buf)?;
-                        if let Response::Connect { timeout, .. } = r {
+                        let mut r = Response::parse(opcode, buf)?;
+                        if let Response::Connect {
+                            timeout,
+                            session_id,
+                            ref mut password,
+                            ..
+                        } = r
+                        {
                             assert!(timeout >= 0);
                             eprintln!("timeout is {}ms", timeout);
                             self.timeout = time::Duration::from_millis(2 * timeout as u64 / 3);
                             self.timer.reset(time::Instant::now() + self.timeout);
+
+                            // keep track of these for consistent re-connect
+                            self.session_id = session_id;
+                            mem::swap(&mut self.password, password);
                         }
                         tx.send(Ok(r)).is_ok(); // if receiver doesn't care, we don't either
                     }
@@ -329,7 +421,7 @@ where
 
 enum PacketizerState<S> {
     Connected(ActivePacketizer<S>),
-    Reconnecting(Box<Future<Item = ActivePacketizer<S>, Error = failure::Error> + Send>),
+    Reconnecting(Box<Future<Item = ActivePacketizer<S>, Error = failure::Error> + Send + 'static>),
 }
 
 impl<S> PacketizerState<S>
@@ -352,7 +444,10 @@ where
     }
 }
 
-impl<S> Packetizer<S> {
+impl<S> Packetizer<S>
+where
+    S: ZooKeeperTransport,
+{
     fn poll_enqueue(&mut self) -> Result<Async<()>, ()> {
         while let PacketizerState::Connected(ref mut ap) = self.state {
             let (item, tx) = match try_ready!(self.rx.poll()) {
@@ -361,35 +456,8 @@ impl<S> Packetizer<S> {
             };
             eprintln!("got request {:?}", item);
 
-            let lengthi = ap.outbox.len();
-            // dummy length
-            ap.outbox.push(0);
-            ap.outbox.push(0);
-            ap.outbox.push(0);
-            ap.outbox.push(0);
-
-            let xid = self.xid;
+            ap.enqueue(self.xid, item, tx);
             self.xid += 1;
-            let old = ap.reply.insert(xid, (item.opcode(), tx));
-            assert!(old.is_none());
-
-            if let Request::Connect { .. } = item {
-            } else {
-                // xid
-                ap.outbox
-                    .write_i32::<BigEndian>(xid)
-                    .expect("Vec::write should never fail");
-            }
-
-            // type and payload
-            item.serialize_into(&mut ap.outbox)
-                .expect("Vec::write should never fail");
-            // set true length
-            let written = ap.outbox.len() - lengthi - 4;
-            let mut length = &mut ap.outbox[lengthi..lengthi + 4];
-            length
-                .write_i32::<BigEndian>(written as i32)
-                .expect("Vec::write should never fail");
         }
         Ok(Async::NotReady)
     }
@@ -397,7 +465,7 @@ impl<S> Packetizer<S> {
 
 impl<S> Future for Packetizer<S>
 where
-    S: AsyncRead + AsyncWrite,
+    S: ZooKeeperTransport,
 {
     type Item = ();
     type Error = failure::Error;
@@ -436,8 +504,63 @@ where
         match self.state.poll(self.exiting, &mut self.default_watcher) {
             Ok(v) => Ok(v),
             Err(e) => {
-                // TODO: place ourselves in Reconnecting state
-                Err(e)
+                // if e is disconnect, then purge state and reconnect
+                // for now, assume all errors are disconnects
+                // TODO: test this!
+
+                let password = if let PacketizerState::Connected(ActivePacketizer {
+                    ref mut password,
+                    ..
+                }) = self.state
+                {
+                    password.split_off(0)
+                } else {
+                    // XXX: error while connecting -- don't recurse (for now)
+                    return Err(e);
+                };
+
+                if let PacketizerState::Connected(ActivePacketizer {
+                    last_zxid_seen,
+                    session_id,
+                    ..
+                }) = self.state
+                {
+                    let xid = self.xid;
+                    self.xid += 1;
+
+                    let retry = S::connect(&self.addr)
+                        .map_err(|e| e.into())
+                        .map(move |stream| {
+                            let request = Request::Connect {
+                                protocol_version: 0,
+                                last_zxid_seen,
+                                timeout: 0,
+                                session_id,
+                                passwd: password,
+                                read_only: false,
+                            };
+                            eprintln!("about to handshake (again)");
+
+                            let (tx, rx) = oneshot::channel();
+                            tokio::spawn(rx.then(|r| {
+                                eprintln!("re-connection response: {:?}", r);
+                                Ok(())
+                            }));
+
+                            let mut ap = ActivePacketizer::new(stream);
+                            ap.enqueue(xid, request, tx);
+                            ap
+                        });
+
+                    // dropping the old state will also cancel in-flight requests
+                    mem::replace(
+                        &mut self.state,
+                        PacketizerState::Reconnecting(Box::new(retry)),
+                    );
+                    self.poll()
+                } else {
+                    unreachable!();
+                }
             }
         }
     }

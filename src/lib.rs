@@ -30,19 +30,18 @@ impl ZooKeeper {
     ) -> impl Future<Item = (Self, impl Stream<Item = WatchedEvent, Error = ()>), Error = failure::Error>
     {
         let (tx, rx) = futures::sync::mpsc::unbounded();
-        tokio::net::TcpStream::connect(addr)
+        let addr = addr.clone();
+        tokio::net::TcpStream::connect(&addr)
             .map_err(failure::Error::from)
-            .and_then(move |stream| Self::handshake(stream, tx))
+            .and_then(move |stream| Self::handshake(addr, stream, tx))
             .map(move |zk| (zk, rx))
     }
 
-    fn handshake<S>(
-        stream: S,
+    fn handshake(
+        addr: SocketAddr,
+        stream: tokio::net::TcpStream,
         default_watcher: futures::sync::mpsc::UnboundedSender<WatchedEvent>,
-    ) -> impl Future<Item = Self, Error = failure::Error>
-    where
-        S: Send + 'static + AsyncRead + AsyncWrite,
-    {
+    ) -> impl Future<Item = Self, Error = failure::Error> {
         let request = proto::Request::Connect {
             protocol_version: 0,
             last_zxid_seen: 0,
@@ -53,7 +52,7 @@ impl ZooKeeper {
         };
         eprintln!("about to handshake");
 
-        let enqueuer = proto::Packetizer::new(stream, default_watcher);
+        let enqueuer = proto::Packetizer::new(addr, stream, default_watcher);
         enqueuer.enqueue(request).map(move |response| {
             eprintln!("{:?}", response);
             ZooKeeper {
