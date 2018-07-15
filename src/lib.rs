@@ -16,7 +16,7 @@ mod proto;
 mod types;
 
 use proto::ZkError;
-pub use types::{Acl, CreateMode, Stat};
+pub use types::{Acl, CreateMode, KeeperState, Stat, WatchedEvent, WatchedEventType};
 
 #[derive(Clone)]
 pub struct ZooKeeper {
@@ -25,13 +25,21 @@ pub struct ZooKeeper {
 }
 
 impl ZooKeeper {
-    pub fn connect(addr: &SocketAddr) -> impl Future<Item = Self, Error = failure::Error> {
+    pub fn connect(
+        addr: &SocketAddr,
+    ) -> impl Future<Item = (Self, impl Stream<Item = WatchedEvent, Error = ()>), Error = failure::Error>
+    {
+        let (tx, rx) = futures::sync::mpsc::unbounded();
         tokio::net::TcpStream::connect(addr)
             .map_err(failure::Error::from)
-            .and_then(|stream| Self::handshake(stream))
+            .and_then(move |stream| Self::handshake(stream, tx))
+            .map(move |zk| (zk, rx))
     }
 
-    fn handshake<S>(stream: S) -> impl Future<Item = Self, Error = failure::Error>
+    fn handshake<S>(
+        stream: S,
+        default_watcher: futures::sync::mpsc::UnboundedSender<WatchedEvent>,
+    ) -> impl Future<Item = Self, Error = failure::Error>
     where
         S: Send + 'static + AsyncRead + AsyncWrite,
     {
@@ -45,7 +53,7 @@ impl ZooKeeper {
         };
         eprintln!("about to handshake");
 
-        let enqueuer = proto::Packetizer::new(stream);
+        let enqueuer = proto::Packetizer::new(stream, default_watcher);
         enqueuer.enqueue(request).map(move |response| {
             eprintln!("{:?}", response);
             ZooKeeper {
@@ -140,7 +148,7 @@ mod tests {
         let mut rt = tokio::runtime::Runtime::new().unwrap();
         let zk: ZooKeeper =
             rt.block_on(
-                ZooKeeper::connect(&"127.0.0.1:2181".parse().unwrap()).and_then(|zk| {
+                ZooKeeper::connect(&"127.0.0.1:2181".parse().unwrap()).and_then(|(zk, _)| {
                     zk.create(
                         "/foo",
                         &b"Hello world"[..],

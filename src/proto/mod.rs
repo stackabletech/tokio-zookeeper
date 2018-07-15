@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::time;
 use tokio;
 use tokio::prelude::*;
+use WatchedEvent;
 
 mod error;
 mod request;
@@ -63,6 +64,9 @@ pub(crate) struct Packetizer<S> {
     /// What operation are we waiting for a response for?
     reply: HashMap<i32, (request::OpCode, oneshot::Sender<Result<Response, ZkError>>)>,
 
+    /// Watcher to send watch events to.
+    default_watcher: mpsc::UnboundedSender<WatchedEvent>,
+
     /// Incoming requests
     rx: mpsc::UnboundedReceiver<(Request, oneshot::Sender<Result<Response, ZkError>>)>,
 
@@ -75,7 +79,7 @@ pub(crate) struct Packetizer<S> {
 
 impl<S> Packetizer<S> {
     /// TODO: document that it calls tokio::spawn
-    pub(crate) fn new(stream: S) -> Enqueuer
+    pub(crate) fn new(stream: S, default_watcher: mpsc::UnboundedSender<WatchedEvent>) -> Enqueuer
     where
         S: Send + 'static + AsyncRead + AsyncWrite,
     {
@@ -94,6 +98,7 @@ impl<S> Packetizer<S> {
                 instart: 0,
                 xid: 0,
                 reply: Default::default(),
+                default_watcher,
                 rx: rx,
                 exiting: false,
                 first: true,
@@ -240,7 +245,14 @@ impl<S> Packetizer<S> {
                     xid
                 };
 
-                if xid == -2 {
+                if xid == -1 {
+                    // watch event
+                    use self::response::ReadFrom;
+                    let e = WatchedEvent::read_from(&mut buf)?;
+                    // TODO: maybe send to non-default watcher
+                    // NOTE: ignoring error, because the user may not care about events
+                    let _ = self.default_watcher.unbounded_send(e);
+                } else if xid == -2 {
                     // response to heartbeat
                 } else {
                     // response to user request
