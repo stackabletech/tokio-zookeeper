@@ -5,6 +5,7 @@ use futures::{
     sync::{mpsc, oneshot},
 };
 use std::collections::HashMap;
+use std::time;
 use tokio;
 use tokio::prelude::*;
 
@@ -43,6 +44,10 @@ impl Enqueuer {
 pub(crate) struct Packetizer<S> {
     stream: S,
 
+    /// Heartbeat timer,
+    timer: tokio::timer::Delay,
+    timeout: time::Duration,
+
     /// Bytes we have not yet set.
     outbox: Vec<u8>,
 
@@ -79,6 +84,10 @@ impl<S> Packetizer<S> {
         tokio::spawn(
             Packetizer {
                 stream,
+                timer: tokio::timer::Delay::new(
+                    time::Instant::now() + time::Duration::from_secs(86_400),
+                ),
+                timeout: time::Duration::new(0, 0),
                 outbox: Vec::new(),
                 outstart: 0,
                 inbox: Vec::new(),
@@ -152,13 +161,19 @@ impl<S> Packetizer<S> {
     where
         S: AsyncWrite,
     {
+        let mut wrote = false;
         while self.outlen() != 0 {
             let n = try_ready!(self.stream.poll_write(&self.outbox[self.outstart..]));
+            wrote = true;
             self.outstart += n;
             if self.outstart == self.outbox.len() {
                 self.outbox.clear();
                 self.outstart = 0;
             }
+        }
+
+        if wrote {
+            self.timer.reset(time::Instant::now() + self.timeout);
         }
 
         self.stream.poll_flush().map_err(failure::Error::from)
@@ -211,6 +226,8 @@ impl<S> Packetizer<S> {
             {
                 let mut err = None;
                 let mut buf = &self.inbox[self.instart + 4..self.instart + need];
+                self.instart += need;
+
                 let xid = if self.first {
                     0
                 } else {
@@ -222,19 +239,30 @@ impl<S> Packetizer<S> {
                     }
                     xid
                 };
-                self.first = false;
-                eprintln!("{:?}", buf);
 
-                // find the waiting request future
-                let (opcode, tx) = self.reply.remove(&xid).unwrap(); // TODO: return an error if xid was unknown
-                eprintln!("handling response to xid {} with opcode {:?}", xid, opcode);
-
-                self.instart += need;
-                if let Some(e) = err {
-                    tx.send(Err(e)).is_ok();
+                if xid == -2 {
+                    // response to heartbeat
                 } else {
-                    let r = Response::parse(opcode, buf)?;
-                    tx.send(Ok(r)).is_ok(); // if receiver doesn't care, we don't either
+                    // response to user request
+                    self.first = false;
+                    eprintln!("{:?}", buf);
+
+                    // find the waiting request future
+                    let (opcode, tx) = self.reply.remove(&xid).unwrap(); // TODO: return an error if xid was unknown
+                    eprintln!("handling response to xid {} with opcode {:?}", xid, opcode);
+
+                    if let Some(e) = err {
+                        tx.send(Err(e)).is_ok();
+                    } else {
+                        let r = Response::parse(opcode, buf)?;
+                        if let Response::Connect { timeout, .. } = r {
+                            assert!(timeout >= 0);
+                            eprintln!("timeout is {}ms", timeout);
+                            self.timeout = time::Duration::from_millis(2 * timeout as u64 / 3);
+                            self.timer.reset(time::Instant::now() + self.timeout);
+                        }
+                        tx.send(Ok(r)).is_ok(); // if receiver doesn't care, we don't either
+                    }
                 }
             }
 
@@ -268,8 +296,32 @@ where
 
         eprintln!("poll_read");
         let r = self.poll_read()?;
+
+        if let Async::Ready(()) = self.timer.poll()? {
+            if self.outbox.is_empty() {
+                // send a ping!
+                // length is known for pings
+                self.outbox
+                    .write_i32::<BigEndian>(8)
+                    .expect("Vec::write should never fail");
+                // xid
+                self.outbox
+                    .write_i32::<BigEndian>(-2)
+                    .expect("Vec::write should never fail");
+                // opcode
+                self.outbox
+                    .write_i32::<BigEndian>(request::OpCode::Ping as i32)
+                    .expect("Vec::write should never fail");
+            } else {
+                // already request in flight, so no need to also send heartbeat
+            }
+
+            self.timer.reset(time::Instant::now() + self.timeout);
+        }
+
         eprintln!("poll_write");
         let w = self.poll_write()?;
+
         match (r, w) {
             (Async::Ready(()), Async::Ready(())) if self.exiting => {
                 eprintln!("packetizer done");
