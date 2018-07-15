@@ -2,7 +2,7 @@
 ///
 /// The `WatchedEvent` includes exactly what happened, the current state of the ZooKeeper, and the
 /// path of the znode that was involved in the event.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WatchedEvent {
     /// The trigger that caused the watch to hit.
     pub event_type: WatchedEventType,
@@ -16,7 +16,7 @@ pub struct WatchedEvent {
 /// Enumeration of states the client may be at a Watcher Event. It represents the state of the
 /// server at the time the event was generated.
 #[repr(i32)]
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeeperState {
     /// The client is in the disconnected state - it is not connected to any server in the ensemble.
     Disconnected = 0,
@@ -55,7 +55,7 @@ impl From<i32> for KeeperState {
 
 /// Enumeration of types of events that may occur on the znode.
 #[repr(i32)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WatchedEventType {
     /// Nothing known has occurred on the znode. This value is issued as part of a `WatchedEvent`
     /// when the `KeeperState` changes.
