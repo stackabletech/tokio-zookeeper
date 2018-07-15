@@ -1,3 +1,6 @@
+mod acl;
+pub use self::acl::*;
+
 /// Statistics about a znode, similar to the UNIX `stat` structure.
 ///
 /// # Time in ZooKeeper
@@ -12,7 +15,7 @@
 ///   numbers of that node.
 /// - **Clock Time**: ZooKeeper does not use clock time to make decisions, but it uses it to put
 ///   timestamps into the `Stat` structure.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct Stat {
     /// The transaction ID that created the znode.
     pub czxid: i64,
@@ -36,4 +39,34 @@ pub struct Stat {
     pub num_children: i32,
     /// The transaction ID that last modified the children of the znode.
     pub pzxid: i64,
+}
+
+/// CreateMode value determines how the znode is created on ZooKeeper.
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CreateMode {
+    /// The znode will not be automatically deleted upon client's disconnect.
+    Persistent = 0,
+    /// The znode will be deleted upon the client's disconnect.
+    Ephemeral = 1,
+    /// The name of the znode will be appended with a monotonically increasing number. The actual
+    /// path name of a sequential node will be the given path plus a suffix `"i"` where *i* is the
+    /// current sequential number of the node. The sequence number is always fixed length of 10
+    /// digits, 0 padded. Once such a node is created, the sequential number will be incremented by
+    /// one.
+    PersistentSequential = 2,
+    /// The znode will be deleted upon the client's disconnect, and its name will be appended with a
+    /// monotonically increasing number.
+    EphemeralSequential = 3,
+    /// Container nodes are special purpose nodes useful for recipes such as leader, lock, etc. When
+    /// the last child of a container is deleted, the container becomes a candidate to be deleted by
+    /// the server at some point in the future. Given this property, you should be prepared to get
+    /// `ZkError::NoNode` when creating children inside of this container node.
+    Container = 4,
+    //
+    // 421
+    // 000
+    // ^----- is it a container?
+    //  ^---- is it sequential?
+    //   ^--- is it ephemeral?
 }

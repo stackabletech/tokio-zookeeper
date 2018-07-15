@@ -15,6 +15,8 @@ pub(crate) enum Response {
     Exists {
         stat: Stat,
     },
+    Empty,
+    String(String),
 }
 
 pub trait ReadFrom: Sized {
@@ -86,6 +88,8 @@ impl Response {
             OpCode::Exists => Ok(Response::Exists {
                 stat: Stat::read_from(&mut reader)?,
             }),
+            OpCode::Delete => Ok(Response::Empty),
+            OpCode::Create => Ok(Response::String(reader.read_string()?)),
             _ => unimplemented!(),
         }
     }
