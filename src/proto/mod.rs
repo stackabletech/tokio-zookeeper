@@ -298,12 +298,10 @@ where
                 } else {
                     let xid = buf.read_i32::<BigEndian>()?;
                     let zxid = buf.read_i64::<BigEndian>()?;
-                    if zxid != -1 {
+                    if zxid > 0 {
                         eprintln!("{} {}", zxid, self.last_zxid_seen);
                         assert!(zxid >= self.last_zxid_seen);
                         self.last_zxid_seen = zxid;
-                    } else {
-                        assert!(xid == -1, "only watch events should not have zxid");
                     }
                     let errcode = buf.read_i32::<BigEndian>()?;
                     if errcode != 0 {
