@@ -255,25 +255,24 @@ where
             while self.inlen() < need {
                 eprintln!("READ MORE BYTES, have {}", self.inlen());
                 let read_from = self.inbox.len();
-                self.inbox.resize(read_from + need, 0);
+                self.inbox.resize(self.instart + need, 0);
                 match self.stream.poll_read(&mut self.inbox[read_from..])? {
                     Async::Ready(n) => {
+                        self.inbox.truncate(read_from + n);
                         if n == 0 {
-                            let left = &self.inbox[self.instart..];
-                            if left == &[0, 0, 0, 0][..] {
-                                // server normally sends 4*0x00 at the end
-                                return Ok(Async::Ready(()));
-                            } else {
+                            if self.inlen() != 0 {
                                 eprintln!("{:x?}", &self.inbox[..]);
                                 bail!(
                                     "connection closed with {} bytes left in buffer: {:x?}",
                                     self.inlen(),
                                     &self.inbox[self.instart..]
                                 );
+                            } else {
+                                // Server closed session with no bytes left in buffer
+                                return Ok(Async::Ready(()));
                             }
                         }
 
-                        self.inbox.truncate(read_from + n);
                         if self.inlen() >= 4 && need == 4 {
                             let length = (&mut &self.inbox[self.instart..]).read_i32::<BigEndian>()?
                                 as usize;
@@ -410,7 +409,7 @@ where
                 eprintln!("packetizer done");
                 Ok(Async::Ready(()))
             }
-            (Async::Ready(()), Async::Ready(())) => Ok(Async::NotReady),
+            (Async::Ready(()), Async::Ready(())) => bail!("Not exiting, but server closed connection"),
             (Async::Ready(()), _) => bail!("outstanding requests, but response channel closed"),
             _ => Ok(Async::NotReady),
         }
