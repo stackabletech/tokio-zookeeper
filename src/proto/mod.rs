@@ -252,11 +252,10 @@ where
                 4
             };
 
-            let orig_len = self.inbox.len();
             while self.inlen() < need {
                 eprintln!("READ MORE BYTES, have {}", self.inlen());
                 let read_from = self.inbox.len();
-                self.inbox.resize(orig_len + need, 0);
+                self.inbox.resize(self.instart + need, 0);
                 match self.stream.poll_read(&mut self.inbox[read_from..])? {
                     Async::Ready(n) => {
                         self.inbox.truncate(read_from + n);
