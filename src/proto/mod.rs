@@ -156,7 +156,7 @@ where
             timer: tokio::timer::Delay::new(
                 time::Instant::now() + time::Duration::from_secs(86_400),
             ),
-            timeout: time::Duration::new(0, 0),
+            timeout: time::Duration::new(86_400, 0),
             outbox: Vec::new(),
             outstart: 0,
             inbox: Vec::new(),
