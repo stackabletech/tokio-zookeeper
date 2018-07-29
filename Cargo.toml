@@ -1,7 +1,19 @@
 [package]
 name = "tokio-zookeeper"
 version = "0.1.0"
+
+description = "Asynchronous client library for interacting with Apache ZooKeeper"
+readme = "README.md"
+
 authors = ["Jon Gjengset <jon@thesquareplanet.com>"]
+
+homepage = "https://github.com/jonhoo/tokio-zookeeper"
+repository = "https://github.com/jonhoo/tokio-zookeeper.git"
+
+keywords = ["zookeeper", "tokio", "asynchronous"]
+categories = ["api-bindings", "asynchronous", "network-programming"]
+
+license = "MIT/Apache-2.0"
 
 [dependencies]
 futures = "0.1"
