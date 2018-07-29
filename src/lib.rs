@@ -1,9 +1,7 @@
 //! See [`ZooKeeper`].
 //!
-//! # Limitations
-//!
-//!  - Multi-server connections are not supported
-//!  - Client does not recover from errors during reconnects (e.g., session expiry)
+//! Note that the futures in this crate expect to be running under a `tokio::Runtime`. In the
+//! common case, you cannot resolve them solely using `.wait()`.
 
 #![deny(missing_docs)]
 #![deny(missing_debug_implementations)]
@@ -54,10 +52,6 @@ pub use types::{Acl, CreateMode, KeeperState, Stat, WatchedEvent, WatchedEventTy
 /// triggered, an event will be delivered to the client which left the watch at the first place.
 /// Each watch can be triggered only once. Thus, up to one event will be delivered to a client for
 /// every watch it leaves.
-// TODO: When a client drops the current connection and re-connects to a server, all the existing
-// watches are considered as being triggered but the undelivered events are lost. To emulate this,
-// the client will generate a special event to tell the event handler a connection has been
-// dropped. This special event has EventType None and KeeperState Disconnected.
 #[derive(Debug, Clone)]
 pub struct ZooKeeper {
     #[allow(dead_code)]
@@ -75,17 +69,6 @@ impl ZooKeeper {
     /// If the connection to the server fails, the client will automatically try to re-connect.
     /// Only if re-connection fails is an error returned to the client. Requests that are in-flight
     /// during a disconnect may fail and have to be retried.
-    // TODO: To create a ZooKeeper client object, the application needs to pass a connection string
-    // containing a comma separated list of host:port pairs, each corresponding to a ZooKeeper
-    // server. The instantiated ZooKeeper client object will pick an arbitrary server from the
-    // connectString and attempt to connect to it. If establishment of the connection fails,
-    // another server in the connect string will be tried (the order is non-deterministic, as we
-    // random shuffle the list), until a connection is established. The client will continue
-    // attempts until the session is explicitly closed.
-    //
-    // TODO: An optional "chroot" suffix may also be appended to the connection string. This will
-    // run the client commands while interpreting all paths relative to this root (similar to the
-    // unix chroot command).
     pub fn connect(
         addr: &SocketAddr,
     ) -> impl Future<Item = (Self, impl Stream<Item = WatchedEvent, Error = ()>), Error = failure::Error>

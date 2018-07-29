@@ -69,8 +69,6 @@ pub(crate) struct Enqueuer(
 );
 
 impl Enqueuer {
-    // TODO: maybe:
-    // fn enqueue<Req, Res>(&self, req: Req) -> impl Future<Item = Res> where Res: Returns<Req>
     pub(crate) fn enqueue(
         &self,
         request: Request,
@@ -113,7 +111,6 @@ impl<S> Packetizer<S>
 where
     S: ZooKeeperTransport,
 {
-    /// TODO: document that it calls tokio::spawn
     pub(crate) fn new(
         addr: S::Addr,
         stream: S,
@@ -122,7 +119,6 @@ where
     where
         S: Send + 'static + AsyncRead + AsyncWrite,
     {
-        // TODO: do connect directly here now that we can
         let (tx, rx) = mpsc::unbounded();
 
         tokio::spawn(
