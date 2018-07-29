@@ -81,7 +81,7 @@ impl ZooKeeper {
             })
             .and_then(move |r| match r {
                 Ok(proto::Response::String(s)) => Ok(Ok(s)),
-                Ok(_) => unreachable!("got non-string response to create"),
+                Ok(r) => bail!("got non-string response to create: {:?}", r),
                 Err(ZkError::NoNode) => Ok(Err(error::Create::NoNode)),
                 Err(ZkError::NodeExists) => Ok(Err(error::Create::NodeExists)),
                 Err(ZkError::InvalidACL) => Ok(Err(error::Create::InvalidAcl)),
@@ -105,11 +105,9 @@ impl ZooKeeper {
             })
             .and_then(|r| match r {
                 Ok(proto::Response::Exists { stat }) => Ok(Some(stat)),
+                Ok(r) => bail!("got a non-create response to a create request: {:?}", r),
                 Err(ZkError::NoNode) => Ok(None),
                 Err(e) => bail!("exists call failed: {:?}", e),
-                _ => {
-                    unreachable!("got a non-create response to a create request: {:?}", r);
-                }
             })
             .map(move |r| (self, r))
     }
@@ -127,13 +125,49 @@ impl ZooKeeper {
             })
             .and_then(move |r| match r {
                 Ok(proto::Response::Empty) => Ok(Ok(())),
-                Ok(_) => unreachable!("got non-empty response to delete"),
+                Ok(r) => bail!("got non-empty response to delete: {:?}", r),
                 Err(ZkError::NoNode) => Ok(Err(error::Delete::NoNode)),
                 Err(ZkError::NotEmpty) => Ok(Err(error::Delete::NotEmpty)),
                 Err(ZkError::BadVersion) => {
                     Ok(Err(error::Delete::BadVersion { expected: version }))
                 }
                 Err(e) => Err(format_err!("delete call failed: {:?}", e)),
+            })
+            .map(move |r| (self, r))
+    }
+
+    pub fn get_children(
+        self,
+        path: &str,
+    ) -> impl Future<Item = (Self, Option<Vec<String>>), Error = failure::Error> {
+        self.connection
+            .enqueue(proto::Request::GetChildren {
+                path: path.to_string(),
+                watch: 0,
+            })
+            .and_then(move |r| match r {
+                Ok(proto::Response::Strings(children)) => Ok(Some(children)),
+                Ok(r) => bail!("got non-strings response to get-children: {:?}", r),
+                Err(ZkError::NoNode) => Ok(None),
+                Err(e) => Err(format_err!("get-children call failed: {:?}", e)),
+            })
+            .map(move |r| (self, r))
+    }
+
+    pub fn get_data(
+        self,
+        path: &str,
+    ) -> impl Future<Item = (Self, Option<(Vec<u8>, Stat)>), Error = failure::Error> {
+        self.connection
+            .enqueue(proto::Request::GetData {
+                path: path.to_string(),
+                watch: 0,
+            })
+            .and_then(move |r| match r {
+                Ok(proto::Response::GetData { bytes, stat }) => Ok(Some((bytes, stat))),
+                Ok(r) => bail!("got non-data response to get-data: {:?}", r),
+                Err(ZkError::NoNode) => Ok(None),
+                Err(e) => Err(format_err!("get-data call failed: {:?}", e)),
             })
             .map(move |r| (self, r))
     }
@@ -166,6 +200,39 @@ mod tests {
                         .inspect(|(_, stat)| {
                             assert_eq!(stat.unwrap().data_length as usize, b"Hello world".len())
                         })
+                        .and_then(|(zk, _)| zk.get_data("/foo"))
+                        .inspect(|(_, res)| {
+                            let data = b"Hello world";
+                            let res = res.as_ref().unwrap();
+                            assert_eq!(res.0, data);
+                            assert_eq!(res.1.data_length as usize, data.len());
+                        })
+                        .and_then(|(zk, _)| {
+                            zk.create(
+                                "/foo/bar",
+                                &b"Hello bar"[..],
+                                Acl::open_unsafe(),
+                                CreateMode::Persistent,
+                            )
+                        })
+                        .inspect(|(_, ref path)| {
+                            assert_eq!(path.as_ref().map(String::as_str), Ok("/foo/bar"))
+                        })
+                        .and_then(|(zk, _)| zk.get_children("/foo"))
+                        .inspect(|(_, children)| {
+                            assert_eq!(children, &Some(vec!["bar".to_string()]));
+                        })
+                        .and_then(|(zk, _)| zk.get_data("/foo/bar"))
+                        .inspect(|(_, res)| {
+                            let data = b"Hello bar";
+                            let res = res.as_ref().unwrap();
+                            assert_eq!(res.0, data);
+                            assert_eq!(res.1.data_length as usize, data.len());
+                        })
+                        .and_then(|(zk, _)| zk.delete("/foo", None))
+                        .inspect(|(_, res)| assert_eq!(res, &Err(error::Delete::NotEmpty)))
+                        .and_then(|(zk, _)| zk.delete("/foo/bar", None))
+                        .inspect(|(_, res)| assert_eq!(res, &Ok(())))
                         .and_then(|(zk, _)| zk.delete("/foo", None))
                         .inspect(|(_, res)| assert_eq!(res, &Ok(())))
                         .and_then(|(zk, _)| zk.exists("/foo", true))

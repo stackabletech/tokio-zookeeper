@@ -15,12 +15,28 @@ pub(crate) enum Response {
     Exists {
         stat: Stat,
     },
+    GetData {
+        bytes: Vec<u8>,
+        stat: Stat,
+    },
     Empty,
+    Strings(Vec<String>),
     String(String),
 }
 
 pub trait ReadFrom: Sized {
     fn read_from<R: Read>(read: &mut R) -> io::Result<Self>;
+}
+
+impl ReadFrom for Vec<String> {
+    fn read_from<R: Read>(read: &mut R) -> io::Result<Self> {
+        let len = try!(read.read_i32::<BigEndian>());
+        let mut items = Vec::with_capacity(len as usize);
+        for _ in 0..len {
+            items.push(try!(read.read_string()));
+        }
+        Ok(items)
+    }
 }
 
 impl ReadFrom for Stat {
@@ -101,7 +117,12 @@ impl Response {
             OpCode::Exists => Ok(Response::Exists {
                 stat: Stat::read_from(&mut reader)?,
             }),
+            OpCode::GetData => Ok(Response::GetData {
+                bytes: reader.read_buffer()?,
+                stat: Stat::read_from(&mut reader)?,
+            }),
             OpCode::Delete => Ok(Response::Empty),
+            OpCode::GetChildren => Ok(Response::Strings(Vec::<String>::read_from(&mut reader)?)),
             OpCode::Create => Ok(Response::String(reader.read_string()?)),
             _ => unimplemented!(),
         }

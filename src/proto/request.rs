@@ -27,6 +27,14 @@ pub(crate) enum Request {
         acl: Cow<'static, [Acl]>,
         mode: CreateMode,
     },
+    GetChildren {
+        path: String,
+        watch: u8,
+    },
+    GetData {
+        path: String,
+        watch: u8,
+    },
 }
 
 #[derive(Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
@@ -120,8 +128,10 @@ impl Request {
                 buffer.write_all(passwd)?;
                 buffer.write_u8(read_only as u8)?;
             }
-            Request::Exists { ref path, watch } => {
-                buffer.write_i32::<BigEndian>(OpCode::Exists as i32)?;
+            Request::GetData { ref path, watch }
+            | Request::GetChildren { ref path, watch }
+            | Request::Exists { ref path, watch } => {
+                buffer.write_i32::<BigEndian>(self.opcode() as i32)?;
                 path.write_to(&mut *buffer)?;
                 buffer.write_u8(watch)?;
             }
@@ -152,6 +162,8 @@ impl Request {
             Request::Exists { .. } => OpCode::Exists,
             Request::Delete { .. } => OpCode::Delete,
             Request::Create { .. } => OpCode::Create,
+            Request::GetChildren { .. } => OpCode::GetChildren,
+            Request::GetData { .. } => OpCode::GetData,
         }
     }
 }
