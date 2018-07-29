@@ -7,6 +7,7 @@ extern crate tokio;
 #[macro_use]
 extern crate lazy_static;
 
+use futures::sync::oneshot;
 use std::borrow::Cow;
 use std::net::SocketAddr;
 use tokio::prelude::*;
@@ -15,7 +16,7 @@ pub mod error;
 mod proto;
 mod types;
 
-use proto::ZkError;
+use proto::{WatchType, ZkError};
 pub use types::{Acl, CreateMode, KeeperState, Stat, WatchedEvent, WatchedEventType};
 
 #[derive(Clone)]
@@ -93,25 +94,6 @@ impl ZooKeeper {
             .map(move |r| (self, r))
     }
 
-    pub fn exists(
-        self,
-        path: &str,
-        watch: bool,
-    ) -> impl Future<Item = (Self, Option<Stat>), Error = failure::Error> {
-        self.connection
-            .enqueue(proto::Request::Exists {
-                path: path.to_string(),
-                watch: if watch { 1 } else { 0 },
-            })
-            .and_then(|r| match r {
-                Ok(proto::Response::Exists { stat }) => Ok(Some(stat)),
-                Ok(r) => bail!("got a non-create response to a create request: {:?}", r),
-                Err(ZkError::NoNode) => Ok(None),
-                Err(e) => bail!("exists call failed: {:?}", e),
-            })
-            .map(move |r| (self, r))
-    }
-
     pub fn delete(
         self,
         path: &str,
@@ -135,15 +117,111 @@ impl ZooKeeper {
             })
             .map(move |r| (self, r))
     }
+}
+
+impl ZooKeeper {
+    pub fn watch(self) -> AndWatch {
+        AndWatch {
+            zk: self,
+            w: WatchSettings::Global,
+        }
+    }
+
+    pub fn with_watcher(
+        self,
+    ) -> (
+        AndWatch,
+        impl Future<Item = WatchedEvent, Error = futures::Canceled>,
+    ) {
+        let (tx, rx) = oneshot::channel();
+        let aw = AndWatch {
+            zk: self,
+            w: WatchSettings::Custom(tx),
+        };
+        (aw, rx)
+    }
+
+    fn nowatch(self) -> AndWatch {
+        AndWatch {
+            zk: self,
+            w: WatchSettings::None,
+        }
+    }
+
+    pub fn exists(
+        self,
+        path: &str,
+    ) -> impl Future<Item = (Self, Option<Stat>), Error = failure::Error> {
+        self.nowatch().exists(path)
+    }
 
     pub fn get_children(
         self,
         path: &str,
     ) -> impl Future<Item = (Self, Option<Vec<String>>), Error = failure::Error> {
-        self.connection
+        self.nowatch().get_children(path)
+    }
+
+    pub fn get_data(
+        self,
+        path: &str,
+    ) -> impl Future<Item = (Self, Option<(Vec<u8>, Stat)>), Error = failure::Error> {
+        self.nowatch().get_data(path)
+    }
+}
+
+enum WatchSettings {
+    None,
+    Global,
+    Custom(oneshot::Sender<WatchedEvent>),
+}
+
+pub struct AndWatch {
+    zk: ZooKeeper,
+    w: WatchSettings,
+}
+
+impl AndWatch {
+    fn register_watcher(self, path: &str, wtype: WatchType) -> (ZooKeeper, bool) {
+        let AndWatch { zk, w } = self;
+        match w {
+            WatchSettings::None => (zk, false),
+            WatchSettings::Global => (zk, true),
+            WatchSettings::Custom(tx) => {
+                zk.connection.add_watcher(path.to_string(), wtype, tx);
+                (zk, true)
+            }
+        }
+    }
+
+    pub fn exists(
+        self,
+        path: &str,
+    ) -> impl Future<Item = (ZooKeeper, Option<Stat>), Error = failure::Error> {
+        let (zk, watch) = self.register_watcher(path, WatchType::Exist);
+        zk.connection
+            .enqueue(proto::Request::Exists {
+                path: path.to_string(),
+                watch: if watch { 1 } else { 0 },
+            })
+            .and_then(|r| match r {
+                Ok(proto::Response::Exists { stat }) => Ok(Some(stat)),
+                Ok(r) => bail!("got a non-create response to a create request: {:?}", r),
+                Err(ZkError::NoNode) => Ok(None),
+                Err(e) => bail!("exists call failed: {:?}", e),
+            })
+            .map(move |r| (zk, r))
+    }
+
+    pub fn get_children(
+        self,
+        path: &str,
+    ) -> impl Future<Item = (ZooKeeper, Option<Vec<String>>), Error = failure::Error> {
+        let (zk, watch) = self.register_watcher(path, WatchType::Child);
+        zk.connection
             .enqueue(proto::Request::GetChildren {
                 path: path.to_string(),
-                watch: 0,
+                watch: if watch { 1 } else { 0 },
             })
             .and_then(move |r| match r {
                 Ok(proto::Response::Strings(children)) => Ok(Some(children)),
@@ -151,17 +229,18 @@ impl ZooKeeper {
                 Err(ZkError::NoNode) => Ok(None),
                 Err(e) => Err(format_err!("get-children call failed: {:?}", e)),
             })
-            .map(move |r| (self, r))
+            .map(move |r| (zk, r))
     }
 
     pub fn get_data(
         self,
         path: &str,
-    ) -> impl Future<Item = (Self, Option<(Vec<u8>, Stat)>), Error = failure::Error> {
-        self.connection
+    ) -> impl Future<Item = (ZooKeeper, Option<(Vec<u8>, Stat)>), Error = failure::Error> {
+        let (zk, watch) = self.register_watcher(path, WatchType::Data);
+        zk.connection
             .enqueue(proto::Request::GetData {
                 path: path.to_string(),
-                watch: 0,
+                watch: if watch { 1 } else { 0 },
             })
             .and_then(move |r| match r {
                 Ok(proto::Response::GetData { bytes, stat }) => Ok(Some((bytes, stat))),
@@ -169,7 +248,7 @@ impl ZooKeeper {
                 Err(ZkError::NoNode) => Ok(None),
                 Err(e) => Err(format_err!("get-data call failed: {:?}", e)),
             })
-            .map(move |r| (self, r))
+            .map(move |r| (zk, r))
     }
 }
 
@@ -183,7 +262,10 @@ mod tests {
         let (zk, w): (ZooKeeper, _) =
             rt.block_on(
                 ZooKeeper::connect(&"127.0.0.1:2181".parse().unwrap()).and_then(|(zk, w)| {
-                    zk.exists("/foo", true)
+                    let (fut, exists_w) = zk.with_watcher();
+                    fut.exists("/foo")
+                        .inspect(|(_, stat)| assert_eq!(stat, &None))
+                        .and_then(|(zk, _)| zk.watch().exists("/foo"))
                         .inspect(|(_, stat)| assert_eq!(stat, &None))
                         .and_then(|(zk, _)| {
                             zk.create(
@@ -196,7 +278,22 @@ mod tests {
                         .inspect(|(_, ref path)| {
                             assert_eq!(path.as_ref().map(String::as_str), Ok("/foo"))
                         })
-                        .and_then(|(zk, _)| zk.exists("/foo", true))
+                        .and_then(move |(zk, _)| {
+                            exists_w
+                                .map(move |w| (zk, w))
+                                .map_err(|e| format_err!("exists_w failed: {:?}", e))
+                        })
+                        .inspect(|(_, event)| {
+                            assert_eq!(
+                                event,
+                                &WatchedEvent {
+                                    event_type: WatchedEventType::NodeCreated,
+                                    keeper_state: KeeperState::SyncConnected,
+                                    path: String::from("/foo"),
+                                }
+                            );
+                        })
+                        .and_then(|(zk, _)| zk.watch().exists("/foo"))
                         .inspect(|(_, stat)| {
                             assert_eq!(stat.unwrap().data_length as usize, b"Hello world".len())
                         })
@@ -235,7 +332,7 @@ mod tests {
                         .inspect(|(_, res)| assert_eq!(res, &Ok(())))
                         .and_then(|(zk, _)| zk.delete("/foo", None))
                         .inspect(|(_, res)| assert_eq!(res, &Ok(())))
-                        .and_then(|(zk, _)| zk.exists("/foo", true))
+                        .and_then(|(zk, _)| zk.watch().exists("/foo"))
                         .inspect(|(_, stat)| assert_eq!(stat, &None))
                         .and_then(move |(zk, _)| {
                             w.into_future()

@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::{mem, time};
 use tokio;
 use tokio::prelude::*;
-use WatchedEvent;
+use {WatchedEvent, WatchedEventType};
 
 mod error;
 mod request;
@@ -35,20 +35,45 @@ impl ZooKeeperTransport for tokio::net::TcpStream {
     }
 }
 
+#[derive(Debug)]
+pub(crate) enum Task {
+    Request {
+        request: Request,
+        response: oneshot::Sender<Result<Response, ZkError>>,
+    },
+    AddWatcher {
+        path: String,
+        wtype: WatchType,
+        tx: oneshot::Sender<WatchedEvent>,
+    },
+}
+
+/// Describes what a `Watch` is looking for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum WatchType {
+    /// Watching for changes to children.
+    Child,
+    /// Watching for changes to data.
+    Data,
+    /// Watching for the creation of a node at the given path.
+    Exist,
+}
+
 #[derive(Clone, Debug)]
-pub(crate) struct Enqueuer(
-    mpsc::UnboundedSender<(Request, oneshot::Sender<Result<Response, ZkError>>)>,
-);
+pub(crate) struct Enqueuer(mpsc::UnboundedSender<Task>);
 
 impl Enqueuer {
     // TODO: maybe:
     // fn enqueue<Req, Res>(&self, req: Req) -> impl Future<Item = Res> where Res: Returns<Req>
     pub(crate) fn enqueue(
         &self,
-        req: Request,
+        request: Request,
     ) -> impl Future<Item = Result<Response, ZkError>, Error = failure::Error> {
         let (tx, rx) = oneshot::channel();
-        match self.0.unbounded_send((req, tx)) {
+        match self.0.unbounded_send(Task::Request {
+            request,
+            response: tx,
+        }) {
             Ok(()) => {
                 Either::A(rx.map_err(|e| format_err!("failed to enqueue new request: {:?}", e)))
             }
@@ -56,6 +81,17 @@ impl Enqueuer {
                 Either::B(Err(format_err!("failed to enqueue new request: {:?}", e)).into_future())
             }
         }
+    }
+
+    pub(crate) fn add_watcher(
+        &self,
+        path: String,
+        wtype: WatchType,
+        tx: oneshot::Sender<WatchedEvent>,
+    ) {
+        self.0
+            .unbounded_send(Task::AddWatcher { path, wtype, tx })
+            .unwrap();
     }
 }
 
@@ -73,7 +109,7 @@ where
     default_watcher: mpsc::UnboundedSender<WatchedEvent>,
 
     /// Incoming requests
-    rx: mpsc::UnboundedReceiver<(Request, oneshot::Sender<Result<Response, ZkError>>)>,
+    rx: mpsc::UnboundedReceiver<Task>,
 
     /// Next xid to issue
     xid: i32,
@@ -138,6 +174,9 @@ struct ActivePacketizer<S> {
     /// What operation are we waiting for a response for?
     reply: HashMap<i32, (request::OpCode, oneshot::Sender<Result<Response, ZkError>>)>,
 
+    /// Custom registered watchers (path -> tx)
+    watchers: HashMap<String, Vec<(oneshot::Sender<WatchedEvent>, WatchType)>>,
+
     first: bool,
 
     /// Fields for re-connection
@@ -162,6 +201,7 @@ where
             inbox: Vec::new(),
             instart: 0,
             reply: Default::default(),
+            watchers: Default::default(),
             first: true,
 
             last_zxid_seen: 0,
@@ -320,9 +360,45 @@ where
                     // watch event
                     use self::response::ReadFrom;
                     let e = WatchedEvent::read_from(&mut buf)?;
-                    // TODO: maybe send to non-default watcher
-                    // NOTE: ignoring error, because the user may not care about events
                     eprintln!("got watcher event {:?}", e);
+
+                    let mut remove = false;
+                    if let Some(watchers) = self.watchers.get_mut(&e.path) {
+                        // custom watchers were set by the user -- notify them
+                        let mut i = (watchers.len() - 1) as isize;
+                        while i >= 0 {
+                            let triggers = match (&watchers[i as usize].1, e.event_type) {
+                                (WatchType::Child, WatchedEventType::NodeDeleted)
+                                | (WatchType::Child, WatchedEventType::NodeChildrenChanged) => true,
+                                (WatchType::Child, _) => false,
+                                (WatchType::Data, WatchedEventType::NodeDeleted)
+                                | (WatchType::Data, WatchedEventType::NodeDataChanged) => true,
+                                (WatchType::Data, _) => false,
+                                (WatchType::Exist, WatchedEventType::NodeChildrenChanged) => false,
+                                (WatchType::Exist, _) => true,
+                            };
+
+                            if triggers {
+                                // this watcher is no longer active
+                                let w = watchers.swap_remove(i as usize);
+                                // NOTE: ignore the case where the receiver has been dropped
+                                let _ = w.0.send(e.clone());
+                            }
+                            i -= 1;
+                        }
+
+                        if watchers.is_empty() {
+                            remove = true;
+                        }
+                    }
+
+                    if remove {
+                        self.watchers
+                            .remove(&e.path)
+                            .expect("tried to remove watcher that didn't exist");
+                    }
+
+                    // NOTE: ignoring error, because the user may not care about events
                     let _ = default_watcher.unbounded_send(e);
                 } else if xid == -2 {
                     // response to ping -- empty response
@@ -448,7 +524,14 @@ where
     fn poll_enqueue(&mut self) -> Result<Async<()>, ()> {
         while let PacketizerState::Connected(ref mut ap) = self.state {
             let (item, tx) = match try_ready!(self.rx.poll()) {
-                Some((item, tx)) => (item, tx),
+                Some(Task::AddWatcher { path, wtype, tx }) => {
+                    ap.watchers
+                        .entry(path)
+                        .or_insert_with(Vec::new)
+                        .push((tx, wtype));
+                    continue;
+                }
+                Some(Task::Request { request, response }) => (request, response),
                 None => return Err(()),
             };
             eprintln!("got request {:?}", item);
