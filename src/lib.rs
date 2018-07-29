@@ -1,3 +1,14 @@
+//! See [`ZooKeeper`].
+//!
+//! # Limitations
+//!
+//!  - Multi-server connections are not supported
+//!  - Client does not recover from errors during reconnects (e.g., session expiry)
+
+#![deny(missing_docs)]
+#![deny(missing_debug_implementations)]
+#![deny(missing_copy_implementations)]
+
 extern crate byteorder;
 #[macro_use]
 extern crate failure;
@@ -12,20 +23,69 @@ use std::borrow::Cow;
 use std::net::SocketAddr;
 use tokio::prelude::*;
 
+/// Per-operation ZooKeeper error types.
 pub mod error;
 mod proto;
 mod types;
 
-use proto::{WatchType, ZkError};
+use proto::{Watch, ZkError};
 pub use types::{Acl, CreateMode, KeeperState, Stat, WatchedEvent, WatchedEventType};
 
-#[derive(Clone)]
+/// A connection to ZooKeeper.
+///
+/// All interactions with ZooKeeper are performed by calling the methods of a `ZooKeeper` instance.
+/// All clones of the same `ZooKeeper` instance use the same underlying connection. Once a
+/// connection to a server is established, a session ID is assigned to the client. The client will
+/// send heart beats to the server periodically to keep the session valid.
+///
+/// The application can call ZooKeeper APIs through a client as long as the session ID of the
+/// client remains valid. If for some reason, the client fails to send heart beats to the server
+/// for a prolonged period of time (exceeding the session timeout value, for instance), the server
+/// will expire the session, and the session ID will become invalid. The `ZooKeeper` instance will
+/// then no longer be usable, and all futures will resolve with a protocol-level error. To make
+/// further ZooKeeper API calls, the application must create a new `ZooKeeper` instance.
+///
+/// If the ZooKeeper server the client currently connects to fails or otherwise does not respond,
+/// the client will automatically try to connect to another server before its session ID expires.
+/// If successful, the application can continue to use the client.
+///
+/// Some successful ZooKeeper API calls can leave watches on the "data nodes" in the ZooKeeper
+/// server. Other successful ZooKeeper API calls can trigger those watches. Once a watch is
+/// triggered, an event will be delivered to the client which left the watch at the first place.
+/// Each watch can be triggered only once. Thus, up to one event will be delivered to a client for
+/// every watch it leaves.
+// TODO: When a client drops the current connection and re-connects to a server, all the existing
+// watches are considered as being triggered but the undelivered events are lost. To emulate this,
+// the client will generate a special event to tell the event handler a connection has been
+// dropped. This special event has EventType None and KeeperState Disconnected.
+#[derive(Debug, Clone)]
 pub struct ZooKeeper {
     #[allow(dead_code)]
     connection: proto::Enqueuer,
 }
 
 impl ZooKeeper {
+    /// Connect to a ZooKeeper server instance at the given address.
+    ///
+    /// Session establishment is asynchronous. This constructor will initiate connection to the
+    /// server and return immediately - potentially (usually) before the session is fully
+    /// established. When the session is established, a `ZooKeeper` instance is returned, along
+    /// with a "watcher" that will provide notifications of any changes in state.
+    ///
+    /// If the connection to the server fails, the client will automatically try to re-connect.
+    /// Only if re-connection fails is an error returned to the client. Requests that are in-flight
+    /// during a disconnect may fail and have to be retried.
+    // TODO: To create a ZooKeeper client object, the application needs to pass a connection string
+    // containing a comma separated list of host:port pairs, each corresponding to a ZooKeeper
+    // server. The instantiated ZooKeeper client object will pick an arbitrary server from the
+    // connectString and attempt to connect to it. If establishment of the connection fails,
+    // another server in the connect string will be tried (the order is non-deterministic, as we
+    // random shuffle the list), until a connection is established. The client will continue
+    // attempts until the session is explicitly closed.
+    //
+    // TODO: An optional "chroot" suffix may also be appended to the connection string. This will
+    // run the client commands while interpreting all paths relative to this root (similar to the
+    // unix chroot command).
     pub fn connect(
         addr: &SocketAddr,
     ) -> impl Future<Item = (Self, impl Stream<Item = WatchedEvent, Error = ()>), Error = failure::Error>
@@ -62,6 +122,35 @@ impl ZooKeeper {
         })
     }
 
+    /// Create a node with the given `path` with `data` as its contents.
+    ///
+    /// The `mode` argument specifies additional options for the newly created node.
+    ///
+    /// If `mode` is set to [`CreateMode::Ephemeral`] (or [`CreateMode::EphemeralSequential`]), the
+    /// node will be removed by the ZooKeeper automatically when the session associated with the
+    /// creation of the node expires.
+    ///
+    /// If `mode` is set to [`CreateMode::PersistentSequential`] or
+    /// [`CreateMode::EphemeralSequential`], the actual path name of a sequential node will be the
+    /// given `path` plus a suffix `i` where `i` is the current sequential number of the node. The
+    /// sequence number is always fixed length of 10 digits, 0 padded. Once such a node is created,
+    /// the sequential number will be incremented by one. The newly created node's full name is
+    /// returned when the future is resolved.
+    ///
+    /// If a node with the same actual path already exists in the ZooKeeper, the returned future
+    /// resolves with an error of [`error::Create::NodeExists`]. Note that since a different actual
+    /// path is used for each invocation of creating sequential nodes with the same `path`
+    /// argument, calls with sequential modes will never return `NodeExists`.
+    ///
+    /// Ephemeral nodes cannot have children in ZooKeeper. Therefore, if the parent node of the
+    /// given `path` is ephemeral, the return future resolves to
+    /// [`error::Create::NoChildrenForEphemerals`].
+    ///
+    /// If a node is created successfully, the ZooKeeper server will trigger the watches on the
+    /// `path` left by `exists` calls, and the watches on the parent of the node by `get_children`
+    /// calls.
+    ///
+    /// The maximum allowable size of the data array is 1 MB (1,048,576 bytes).
     pub fn create<D, A>(
         self,
         path: &str,
@@ -94,6 +183,13 @@ impl ZooKeeper {
             .map(move |r| (self, r))
     }
 
+    /// Delete the node at the given `path`. The call will succeed if such a node exists, and the
+    /// given `version` matches the node's version (if the given `version` is `None`, it matches
+    /// any node's versions).
+    ///
+    /// This operation, if successful, will trigger all the watches on the node of the given `path`
+    /// left by `exists` API calls, and the watches on the parent node left by `get_children` API
+    /// calls.
     pub fn delete(
         self,
         path: &str,
@@ -120,10 +216,13 @@ impl ZooKeeper {
 }
 
 impl ZooKeeper {
+    /// Add a global watch for the next chained operation.
     pub fn watch(self) -> WatchGlobally {
         WatchGlobally(self)
     }
 
+    /// Add a watch for the next chained operation, and return a future for any received event
+    /// along with the operation's (successful) result.
     pub fn with_watcher(self) -> WithWatcher {
         WithWatcher(self)
     }
@@ -147,6 +246,7 @@ impl ZooKeeper {
             .map(move |r| (self, r))
     }
 
+    /// Return the [`Stat`] of the node of the given `path`, or `None` if the node does not exist.
     pub fn exists(
         self,
         path: &str,
@@ -173,6 +273,11 @@ impl ZooKeeper {
             .map(move |r| (self, r))
     }
 
+    /// Return the names of the children of the node at the given `path`, or `None` if the node
+    /// does not exist.
+    ///
+    /// The returned list of children is not sorted and no guarantee is provided as to its natural
+    /// or lexical order.
     pub fn get_children(
         self,
         path: &str,
@@ -199,6 +304,8 @@ impl ZooKeeper {
             .map(move |r| (self, r))
     }
 
+    /// Return the data and the [`Stat`] of the node at the given `path`, or `None` if it does not
+    /// exist.
     pub fn get_data(
         self,
         path: &str,
@@ -207,9 +314,18 @@ impl ZooKeeper {
     }
 }
 
+/// Proxy for [`ZooKeeper`] that adds watches for initiated operations.
+///
+/// Triggered watches produce events on the global watcher stream.
+#[derive(Debug, Clone)]
 pub struct WatchGlobally(ZooKeeper);
 
 impl WatchGlobally {
+    /// Return the [`Stat`] of the node of the given `path`, or `None` if the node does not exist.
+    ///
+    /// If no errors occur, a watch is left on the node at the given `path`. The watch is triggered
+    /// by any successful operation that creates or deletes the node, or sets the node's data. When
+    /// the watch triggers, an event is sent to the global watcher stream.
     pub fn exists(
         self,
         path: &str,
@@ -217,6 +333,16 @@ impl WatchGlobally {
         self.0.exists_w(path, Watch::Global)
     }
 
+    /// Return the names of the children of the node at the given `path`, or `None` if the node
+    /// does not exist.
+    ///
+    /// The returned list of children is not sorted and no guarantee is provided as to its natural
+    /// or lexical order.
+    ///
+    /// If no errors occur, a watch is left on the node at the given `path`. The watch is triggered
+    /// by any successful operation that deletes the node at the given `path`, or creates or
+    /// deletes a child of that node. When the watch triggers, an event is sent to the global
+    /// watcher stream.
     pub fn get_children(
         self,
         path: &str,
@@ -224,6 +350,12 @@ impl WatchGlobally {
         self.0.get_children_w(path, Watch::Global)
     }
 
+    /// Return the data and the [`Stat`] of the node at the given `path`, or `None` if it does not
+    /// exist.
+    ///
+    /// If no errors occur, a watch is left on the node at the given `path`. The watch is triggered
+    /// by any successful operation that sets the node's data, or deletes it. When the watch
+    /// triggers, an event is sent to the global watcher stream.
     pub fn get_data(
         self,
         path: &str,
@@ -232,9 +364,19 @@ impl WatchGlobally {
     }
 }
 
+/// Proxy for [`ZooKeeper`] that adds non-global watches for initiated operations.
+///
+/// Events from triggered watches are yielded through returned `oneshot` channels. All events are
+/// also produced on the global watcher stream.
+#[derive(Debug, Clone)]
 pub struct WithWatcher(ZooKeeper);
 
 impl WithWatcher {
+    /// Return the [`Stat`] of the node of the given `path`, or `None` if the node does not exist.
+    ///
+    /// If no errors occur, a watch will be left on the node at the given `path`. The watch is
+    /// triggered by any successful operation that creates or deletes the node, or sets the data on
+    /// the node, and in turn causes the included `oneshot::Receiver` to resolve.
     pub fn exists(
         self,
         path: &str,
@@ -248,6 +390,16 @@ impl WithWatcher {
             .map(|r| (r.0, rx, r.1))
     }
 
+    /// Return the names of the children of the node at the given `path`, or `None` if the node
+    /// does not exist.
+    ///
+    /// The returned list of children is not sorted and no guarantee is provided as to its natural
+    /// or lexical order.
+    ///
+    /// If no errors occur, a watch is left on the node at the given `path`. The watch is triggered
+    /// by any successful operation that deletes the node at the given `path`, or creates or
+    /// deletes a child of that node, and in turn causes the included `oneshot::Receiver` to
+    /// resolve.
     pub fn get_children(
         self,
         path: &str,
@@ -264,6 +416,12 @@ impl WithWatcher {
             .map(|r| (r.0, r.1.map(move |c| (rx, c))))
     }
 
+    /// Return the data and the [`Stat`] of the node at the given `path`, or `None` if it does not
+    /// exist.
+    ///
+    /// If no errors occur, a watch is left on the node at the given `path`. The watch is triggered
+    /// by any successful operation that sets the node's data, or deletes it, and in turn causes
+    /// the included `oneshot::Receiver` to resolve.
     pub fn get_data(
         self,
         path: &str,

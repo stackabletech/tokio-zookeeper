@@ -1,4 +1,4 @@
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(i32)]
 pub enum ZkError {
     /// This code is never returned from the server. It should not be used other than to indicate a
