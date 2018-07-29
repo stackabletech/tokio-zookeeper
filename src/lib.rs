@@ -15,10 +15,17 @@ extern crate futures;
 extern crate tokio;
 #[macro_use]
 extern crate lazy_static;
+#[macro_use]
+extern crate slog;
+#[cfg(test)]
+extern crate slog_async;
+#[cfg(test)]
+extern crate slog_term;
 
 use futures::sync::oneshot;
 use std::borrow::Cow;
 use std::net::SocketAddr;
+use std::time;
 use tokio::prelude::*;
 
 /// Per-operation ZooKeeper error types.
@@ -56,9 +63,29 @@ pub use types::{Acl, CreateMode, KeeperState, Stat, WatchedEvent, WatchedEventTy
 pub struct ZooKeeper {
     #[allow(dead_code)]
     connection: proto::Enqueuer,
+    logger: slog::Logger,
 }
 
-impl ZooKeeper {
+/// Builder that allows customizing options for ZooKeeper connections.
+#[derive(Debug, Clone)]
+pub struct ZooKeeperBuilder {
+    session_timeout: time::Duration,
+    logger: slog::Logger,
+}
+
+impl Default for ZooKeeperBuilder {
+    fn default() -> Self {
+        let drain = slog::Discard;
+        let root = slog::Logger::root(drain, o!());
+
+        ZooKeeperBuilder {
+            session_timeout: time::Duration::new(0, 0),
+            logger: root,
+        }
+    }
+}
+
+impl ZooKeeperBuilder {
     /// Connect to a ZooKeeper server instance at the given address.
     ///
     /// Session establishment is asynchronous. This constructor will initiate connection to the
@@ -70,39 +97,74 @@ impl ZooKeeper {
     /// Only if re-connection fails is an error returned to the client. Requests that are in-flight
     /// during a disconnect may fail and have to be retried.
     pub fn connect(
+        self,
         addr: &SocketAddr,
-    ) -> impl Future<Item = (Self, impl Stream<Item = WatchedEvent, Error = ()>), Error = failure::Error>
-    {
+    ) -> impl Future<
+        Item = (ZooKeeper, impl Stream<Item = WatchedEvent, Error = ()>),
+        Error = failure::Error,
+    > {
         let (tx, rx) = futures::sync::mpsc::unbounded();
         let addr = addr.clone();
         tokio::net::TcpStream::connect(&addr)
             .map_err(failure::Error::from)
-            .and_then(move |stream| Self::handshake(addr, stream, tx))
+            .and_then(move |stream| self.handshake(addr, stream, tx))
             .map(move |zk| (zk, rx))
     }
 
+    /// Set the ZooKeeper [session expiry
+    /// timeout](https://zookeeper.apache.org/doc/r3.4.12/zookeeperProgrammers.html#ch_zkSessions).
+    ///
+    /// The default timeout is dictated by the server.
+    pub fn set_timeout(&mut self, t: time::Duration) {
+        self.session_timeout = t;
+    }
+
+    /// Set the logger that should be used internally in the ZooKeeper client.
+    ///
+    /// By default, all logging is disabled. See also [the `slog`
+    /// documentation](https://docs.rs/slog).
+    pub fn set_logger(&mut self, l: slog::Logger) {
+        self.logger = l;
+    }
+
     fn handshake(
+        self,
         addr: SocketAddr,
         stream: tokio::net::TcpStream,
         default_watcher: futures::sync::mpsc::UnboundedSender<WatchedEvent>,
-    ) -> impl Future<Item = Self, Error = failure::Error> {
+    ) -> impl Future<Item = ZooKeeper, Error = failure::Error> {
         let request = proto::Request::Connect {
             protocol_version: 0,
             last_zxid_seen: 0,
-            timeout: 0,
+            timeout: (self.session_timeout.as_secs() * 1_000) as i32
+                + self.session_timeout.subsec_millis() as i32,
             session_id: 0,
             passwd: vec![],
             read_only: false,
         };
-        eprintln!("about to handshake");
+        debug!(self.logger, "about to perform handshake");
 
-        let enqueuer = proto::Packetizer::new(addr, stream, default_watcher);
+        let plog = self.logger.clone();
+        let enqueuer = proto::Packetizer::new(addr, stream, plog, default_watcher);
         enqueuer.enqueue(request).map(move |response| {
-            eprintln!("{:?}", response);
+            trace!(self.logger, "{:?}", response);
             ZooKeeper {
                 connection: enqueuer,
+                logger: self.logger,
             }
         })
+    }
+}
+
+impl ZooKeeper {
+    /// Connect to a ZooKeeper server instance at the given address with default parameters.
+    ///
+    /// See [`ZooKeeperBuilder::connect`].
+    pub fn connect(
+        addr: &SocketAddr,
+    ) -> impl Future<Item = (Self, impl Stream<Item = WatchedEvent, Error = ()>), Error = failure::Error>
+    {
+        ZooKeeperBuilder::default().connect(addr)
     }
 
     /// Create a node with the given `path` with `data` as its contents.
@@ -145,6 +207,7 @@ impl ZooKeeper {
         D: Into<Cow<'static, [u8]>>,
         A: Into<Cow<'static, [Acl]>>,
     {
+        trace!(self.logger, "create"; "path" => path, "mode" => ?mode);
         self.connection
             .enqueue(proto::Request::Create {
                 path: path.to_string(),
@@ -178,6 +241,7 @@ impl ZooKeeper {
         path: &str,
         version: Option<i32>,
     ) -> impl Future<Item = (Self, Result<(), error::Delete>), Error = failure::Error> {
+        trace!(self.logger, "delete"; "path" => path, "version" => ?version);
         let version = version.unwrap_or(-1);
         self.connection
             .enqueue(proto::Request::Delete {
@@ -215,6 +279,7 @@ impl ZooKeeper {
         path: &str,
         watch: Watch,
     ) -> impl Future<Item = (Self, Option<Stat>), Error = failure::Error> {
+        trace!(self.logger, "exists"; "path" => path, "watch" => ?watch);
         self.connection
             .enqueue(proto::Request::Exists {
                 path: path.to_string(),
@@ -242,6 +307,7 @@ impl ZooKeeper {
         path: &str,
         watch: Watch,
     ) -> impl Future<Item = (Self, Option<Vec<String>>), Error = failure::Error> {
+        trace!(self.logger, "get_children"; "path" => path, "watch" => ?watch);
         self.connection
             .enqueue(proto::Request::GetChildren {
                 path: path.to_string(),
@@ -273,6 +339,7 @@ impl ZooKeeper {
         path: &str,
         watch: Watch,
     ) -> impl Future<Item = (Self, Option<(Vec<u8>, Stat)>), Error = failure::Error> {
+        trace!(self.logger, "get_data"; "path" => path, "watch" => ?watch);
         self.connection
             .enqueue(proto::Request::GetData {
                 path: path.to_string(),
@@ -426,120 +493,130 @@ impl WithWatcher {
 mod tests {
     use super::*;
 
+    use slog::Drain;
+
     #[test]
     fn it_works() {
         let mut rt = tokio::runtime::Runtime::new().unwrap();
+        let mut builder = ZooKeeperBuilder::default();
+        let decorator = slog_term::TermDecorator::new().build();
+        let drain = slog_term::FullFormat::new(decorator).build().fuse();
+        let drain = slog_async::Async::new(drain).build().fuse();
+        builder.set_logger(slog::Logger::root(drain, o!()));
+
         let (zk, w): (ZooKeeper, _) =
             rt.block_on(
-                ZooKeeper::connect(&"127.0.0.1:2181".parse().unwrap()).and_then(|(zk, w)| {
-                    zk.with_watcher()
-                        .exists("/foo")
-                        .inspect(|(_, _, stat)| assert_eq!(stat, &None))
-                        .and_then(|(zk, exists_w, _)| {
-                            zk.watch()
-                                .exists("/foo")
-                                .map(move |(zk, x)| (zk, x, exists_w))
-                        })
-                        .inspect(|(_, stat, _)| assert_eq!(stat, &None))
-                        .and_then(|(zk, _, exists_w)| {
-                            zk.create(
-                                "/foo",
-                                &b"Hello world"[..],
-                                Acl::open_unsafe(),
-                                CreateMode::Persistent,
-                            ).map(move |(zk, x)| (zk, x, exists_w))
-                        })
-                        .inspect(|(_, ref path, _)| {
-                            assert_eq!(path.as_ref().map(String::as_str), Ok("/foo"))
-                        })
-                        .and_then(move |(zk, _, exists_w)| {
-                            exists_w
-                                .map(move |w| (zk, w))
-                                .map_err(|e| format_err!("exists_w failed: {:?}", e))
-                        })
-                        .inspect(|(_, event)| {
-                            assert_eq!(
-                                event,
-                                &WatchedEvent {
-                                    event_type: WatchedEventType::NodeCreated,
-                                    keeper_state: KeeperState::SyncConnected,
-                                    path: String::from("/foo"),
-                                }
-                            );
-                        })
-                        .and_then(|(zk, _)| zk.watch().exists("/foo"))
-                        .inspect(|(_, stat)| {
-                            assert_eq!(stat.unwrap().data_length as usize, b"Hello world".len())
-                        })
-                        .and_then(|(zk, _)| zk.get_data("/foo"))
-                        .inspect(|(_, res)| {
-                            let data = b"Hello world";
-                            let res = res.as_ref().unwrap();
-                            assert_eq!(res.0, data);
-                            assert_eq!(res.1.data_length as usize, data.len());
-                        })
-                        .and_then(|(zk, _)| {
-                            zk.create(
-                                "/foo/bar",
-                                &b"Hello bar"[..],
-                                Acl::open_unsafe(),
-                                CreateMode::Persistent,
-                            )
-                        })
-                        .inspect(|(_, ref path)| {
-                            assert_eq!(path.as_ref().map(String::as_str), Ok("/foo/bar"))
-                        })
-                        .and_then(|(zk, _)| zk.get_children("/foo"))
-                        .inspect(|(_, children)| {
-                            assert_eq!(children, &Some(vec!["bar".to_string()]));
-                        })
-                        .and_then(|(zk, _)| zk.get_data("/foo/bar"))
-                        .inspect(|(_, res)| {
-                            let data = b"Hello bar";
-                            let res = res.as_ref().unwrap();
-                            assert_eq!(res.0, data);
-                            assert_eq!(res.1.data_length as usize, data.len());
-                        })
-                        .and_then(|(zk, _)| zk.delete("/foo", None))
-                        .inspect(|(_, res)| assert_eq!(res, &Err(error::Delete::NotEmpty)))
-                        .and_then(|(zk, _)| zk.delete("/foo/bar", None))
-                        .inspect(|(_, res)| assert_eq!(res, &Ok(())))
-                        .and_then(|(zk, _)| zk.delete("/foo", None))
-                        .inspect(|(_, res)| assert_eq!(res, &Ok(())))
-                        .and_then(|(zk, _)| zk.watch().exists("/foo"))
-                        .inspect(|(_, stat)| assert_eq!(stat, &None))
-                        .and_then(move |(zk, _)| {
-                            w.into_future()
-                                .map(move |x| (zk, x))
-                                .map_err(|e| format_err!("stream error: {:?}", e.0))
-                        })
-                        .inspect(|(_, (event, _))| {
-                            assert_eq!(
-                                event,
-                                &Some(WatchedEvent {
-                                    event_type: WatchedEventType::NodeCreated,
-                                    keeper_state: KeeperState::SyncConnected,
-                                    path: String::from("/foo"),
-                                })
-                            );
-                        })
-                        .and_then(|(zk, (_, w))| {
-                            w.into_future()
-                                .map(move |x| (zk, x))
-                                .map_err(|e| format_err!("stream error: {:?}", e.0))
-                        })
-                        .inspect(|(_, (event, _))| {
-                            assert_eq!(
-                                event,
-                                &Some(WatchedEvent {
-                                    event_type: WatchedEventType::NodeDeleted,
-                                    keeper_state: KeeperState::SyncConnected,
-                                    path: String::from("/foo"),
-                                })
-                            );
-                        })
-                        .map(|(zk, (_, w))| (zk, w))
-                }),
+                builder
+                    .connect(&"127.0.0.1:2181".parse().unwrap())
+                    .and_then(|(zk, w)| {
+                        zk.with_watcher()
+                            .exists("/foo")
+                            .inspect(|(_, _, stat)| assert_eq!(stat, &None))
+                            .and_then(|(zk, exists_w, _)| {
+                                zk.watch()
+                                    .exists("/foo")
+                                    .map(move |(zk, x)| (zk, x, exists_w))
+                            })
+                            .inspect(|(_, stat, _)| assert_eq!(stat, &None))
+                            .and_then(|(zk, _, exists_w)| {
+                                zk.create(
+                                    "/foo",
+                                    &b"Hello world"[..],
+                                    Acl::open_unsafe(),
+                                    CreateMode::Persistent,
+                                ).map(move |(zk, x)| (zk, x, exists_w))
+                            })
+                            .inspect(|(_, ref path, _)| {
+                                assert_eq!(path.as_ref().map(String::as_str), Ok("/foo"))
+                            })
+                            .and_then(move |(zk, _, exists_w)| {
+                                exists_w
+                                    .map(move |w| (zk, w))
+                                    .map_err(|e| format_err!("exists_w failed: {:?}", e))
+                            })
+                            .inspect(|(_, event)| {
+                                assert_eq!(
+                                    event,
+                                    &WatchedEvent {
+                                        event_type: WatchedEventType::NodeCreated,
+                                        keeper_state: KeeperState::SyncConnected,
+                                        path: String::from("/foo"),
+                                    }
+                                );
+                            })
+                            .and_then(|(zk, _)| zk.watch().exists("/foo"))
+                            .inspect(|(_, stat)| {
+                                assert_eq!(stat.unwrap().data_length as usize, b"Hello world".len())
+                            })
+                            .and_then(|(zk, _)| zk.get_data("/foo"))
+                            .inspect(|(_, res)| {
+                                let data = b"Hello world";
+                                let res = res.as_ref().unwrap();
+                                assert_eq!(res.0, data);
+                                assert_eq!(res.1.data_length as usize, data.len());
+                            })
+                            .and_then(|(zk, _)| {
+                                zk.create(
+                                    "/foo/bar",
+                                    &b"Hello bar"[..],
+                                    Acl::open_unsafe(),
+                                    CreateMode::Persistent,
+                                )
+                            })
+                            .inspect(|(_, ref path)| {
+                                assert_eq!(path.as_ref().map(String::as_str), Ok("/foo/bar"))
+                            })
+                            .and_then(|(zk, _)| zk.get_children("/foo"))
+                            .inspect(|(_, children)| {
+                                assert_eq!(children, &Some(vec!["bar".to_string()]));
+                            })
+                            .and_then(|(zk, _)| zk.get_data("/foo/bar"))
+                            .inspect(|(_, res)| {
+                                let data = b"Hello bar";
+                                let res = res.as_ref().unwrap();
+                                assert_eq!(res.0, data);
+                                assert_eq!(res.1.data_length as usize, data.len());
+                            })
+                            .and_then(|(zk, _)| zk.delete("/foo", None))
+                            .inspect(|(_, res)| assert_eq!(res, &Err(error::Delete::NotEmpty)))
+                            .and_then(|(zk, _)| zk.delete("/foo/bar", None))
+                            .inspect(|(_, res)| assert_eq!(res, &Ok(())))
+                            .and_then(|(zk, _)| zk.delete("/foo", None))
+                            .inspect(|(_, res)| assert_eq!(res, &Ok(())))
+                            .and_then(|(zk, _)| zk.watch().exists("/foo"))
+                            .inspect(|(_, stat)| assert_eq!(stat, &None))
+                            .and_then(move |(zk, _)| {
+                                w.into_future()
+                                    .map(move |x| (zk, x))
+                                    .map_err(|e| format_err!("stream error: {:?}", e.0))
+                            })
+                            .inspect(|(_, (event, _))| {
+                                assert_eq!(
+                                    event,
+                                    &Some(WatchedEvent {
+                                        event_type: WatchedEventType::NodeCreated,
+                                        keeper_state: KeeperState::SyncConnected,
+                                        path: String::from("/foo"),
+                                    })
+                                );
+                            })
+                            .and_then(|(zk, (_, w))| {
+                                w.into_future()
+                                    .map(move |x| (zk, x))
+                                    .map_err(|e| format_err!("stream error: {:?}", e.0))
+                            })
+                            .inspect(|(_, (event, _))| {
+                                assert_eq!(
+                                    event,
+                                    &Some(WatchedEvent {
+                                        event_type: WatchedEventType::NodeDeleted,
+                                        keeper_state: KeeperState::SyncConnected,
+                                        path: String::from("/foo"),
+                                    })
+                                );
+                            })
+                            .map(|(zk, (_, w))| (zk, w))
+                    }),
             ).unwrap();
 
         eprintln!("got through all futures");

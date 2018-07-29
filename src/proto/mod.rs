@@ -4,6 +4,7 @@ use futures::{
     future::Either,
     sync::{mpsc, oneshot},
 };
+use slog;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::{mem, time};
@@ -104,6 +105,8 @@ where
     /// Next xid to issue
     xid: i32,
 
+    logger: slog::Logger,
+
     exiting: bool,
 }
 
@@ -114,6 +117,7 @@ where
     pub(crate) fn new(
         addr: S::Addr,
         stream: S,
+        log: slog::Logger,
         default_watcher: mpsc::UnboundedSender<WatchedEvent>,
     ) -> Enqueuer
     where
@@ -121,6 +125,7 @@ where
     {
         let (tx, rx) = mpsc::unbounded();
 
+        let exitlogger = log.clone();
         tokio::spawn(
             Packetizer {
                 addr,
@@ -128,10 +133,10 @@ where
                 xid: 0,
                 default_watcher,
                 rx: rx,
+                logger: log,
                 exiting: false,
-            }.map_err(|e| {
-                // TODO: expose this error to the user somehow
-                eprintln!("packetizer exiting: {:?}", e);
+            }.map_err(move |e| {
+                error!(exitlogger, "packetizer exiting: {:?}", e);
                 drop(e);
             }),
         );
@@ -240,7 +245,11 @@ where
             .expect("Vec::write should never fail");
     }
 
-    fn poll_write(&mut self, exiting: bool) -> Result<Async<()>, failure::Error>
+    fn poll_write(
+        &mut self,
+        exiting: bool,
+        logger: &mut slog::Logger,
+    ) -> Result<Async<()>, failure::Error>
     where
         S: AsyncWrite,
     {
@@ -256,13 +265,15 @@ where
         }
 
         if wrote {
+            // heartbeat is since last write traffic!
+            trace!(logger, "resetting heartbeat timer");
             self.timer.reset(time::Instant::now() + self.timeout);
         }
 
         self.stream.poll_flush().map_err(failure::Error::from)?;
 
         if exiting {
-            eprintln!("shutting down writer");
+            debug!(logger, "shutting down writer");
             try_ready!(self.stream.shutdown());
         }
 
@@ -272,6 +283,7 @@ where
     fn poll_read(
         &mut self,
         default_watcher: &mut mpsc::UnboundedSender<WatchedEvent>,
+        logger: &mut slog::Logger,
     ) -> Result<Async<()>, failure::Error>
     where
         S: AsyncRead,
@@ -283,9 +295,9 @@ where
             } else {
                 4
             };
+            trace!(logger, "need {} bytes, have {}", need, self.inlen());
 
             while self.inlen() < need {
-                eprintln!("READ MORE BYTES, have {}", self.inlen());
                 let read_from = self.inbox.len();
                 self.inbox.resize(self.instart + need, 0);
                 match self.stream.poll_read(&mut self.inbox[read_from..])? {
@@ -293,7 +305,6 @@ where
                         self.inbox.truncate(read_from + n);
                         if n == 0 {
                             if self.inlen() != 0 {
-                                eprintln!("{:x?}", &self.inbox[..]);
                                 bail!(
                                     "connection closed with {} bytes left in buffer: {:x?}",
                                     self.inlen(),
@@ -301,6 +312,7 @@ where
                                 );
                             } else {
                                 // Server closed session with no bytes left in buffer
+                                debug!(logger, "server closed connection");
                                 return Ok(Async::Ready(()));
                             }
                         }
@@ -318,7 +330,6 @@ where
                 }
             }
 
-            eprintln!("length is {}", need - 4);
             {
                 let mut err = None;
                 let mut buf = &self.inbox[self.instart + 4..self.instart + need];
@@ -330,7 +341,13 @@ where
                     let xid = buf.read_i32::<BigEndian>()?;
                     let zxid = buf.read_i64::<BigEndian>()?;
                     if zxid > 0 {
-                        eprintln!("{} {}", zxid, self.last_zxid_seen);
+                        trace!(
+                            logger,
+                            "updated zxid from {} to {}",
+                            self.last_zxid_seen,
+                            zxid
+                        );
+
                         assert!(zxid >= self.last_zxid_seen);
                         self.last_zxid_seen = zxid;
                     }
@@ -344,7 +361,7 @@ where
                 if xid == 0 && !self.first {
                     // response to shutdown -- empty response
                     // XXX: in theory, server should now shut down receive end
-                    eprintln!("got response to CloseSession");
+                    trace!(logger, "got response to CloseSession");
                     if let Some(e) = err {
                         bail!("failed to close session: {:?}", e);
                     }
@@ -352,12 +369,17 @@ where
                     // watch event
                     use self::response::ReadFrom;
                     let e = WatchedEvent::read_from(&mut buf)?;
-                    eprintln!("got watcher event {:?}", e);
+                    trace!(logger, "got watcher event {:?}", e);
 
                     let mut remove = false;
                     if let Some(watchers) = self.watchers.get_mut(&e.path) {
                         // custom watchers were set by the user -- notify them
                         let mut i = (watchers.len() - 1) as isize;
+                        trace!(logger,
+                               "found potentially waiting custom watchers";
+                               "n" => watchers.len()
+                        );
+
                         while i >= 0 {
                             let triggers = match (&watchers[i as usize].1, e.event_type) {
                                 (WatchType::Child, WatchedEventType::NodeDeleted)
@@ -394,18 +416,16 @@ where
                     let _ = default_watcher.unbounded_send(e);
                 } else if xid == -2 {
                     // response to ping -- empty response
-                    eprintln!("got response to heartbeat");
+                    trace!(logger, "got response to heartbeat");
                     if let Some(e) = err {
                         bail!("bad response to ping: {:?}", e);
                     }
                 } else {
                     // response to user request
                     self.first = false;
-                    eprintln!("{:?}", buf);
 
                     // find the waiting request future
                     let (opcode, tx) = self.reply.remove(&xid).unwrap(); // TODO: return an error if xid was unknown
-                    eprintln!("handling response to xid {} with opcode {:?}", xid, opcode);
 
                     if let Some(w) = self.pending_watchers.remove(&xid) {
                         // normally, watches are *only* added for successful operations
@@ -413,18 +433,33 @@ where
                         if err.is_none()
                             || (opcode == request::OpCode::Exists && err == Some(ZkError::NoNode))
                         {
-                            eprintln!("pending watcher for xid {} turned into real watcher", xid);
+                            trace!(logger, "pending watcher turned into real watcher"; "xid" => xid);
                             self.watchers
                                 .entry(w.0)
                                 .or_insert_with(Vec::new)
                                 .push((w.1, w.2));
+                        } else {
+                            trace!(logger,
+                                   "pending watcher not turned into real watcher: {:?}",
+                                   err;
+                                   "xid" => xid
+                            );
                         }
                     }
 
                     if let Some(e) = err {
+                        info!(logger,
+                               "handling server error response: {:?}", e;
+                               "xid" => xid, "opcode" => ?opcode);
+
                         tx.send(Err(e)).is_ok();
                     } else {
                         let mut r = Response::parse(opcode, buf)?;
+
+                        debug!(logger,
+                               "handling server response: {:?}", r;
+                               "xid" => xid, "opcode" => ?opcode);
+
                         if let Response::Connect {
                             timeout,
                             session_id,
@@ -433,7 +468,8 @@ where
                         } = r
                         {
                             assert!(timeout >= 0);
-                            eprintln!("timeout is {}ms", timeout);
+                            trace!(logger, "negotiated session timeout: {}ms", timeout);
+
                             self.timeout = time::Duration::from_millis(2 * timeout as u64 / 3);
                             self.timer.reset(time::Instant::now() + self.timeout);
 
@@ -457,10 +493,11 @@ where
     fn poll(
         &mut self,
         exiting: bool,
+        logger: &mut slog::Logger,
         default_watcher: &mut mpsc::UnboundedSender<WatchedEvent>,
     ) -> Result<Async<()>, failure::Error> {
-        eprintln!("poll_read");
-        let r = self.poll_read(default_watcher)?;
+        trace!(logger, "poll_read");
+        let r = self.poll_read(default_watcher, logger)?;
 
         if let Async::Ready(()) = self.timer.poll()? {
             if self.outbox.is_empty() {
@@ -477,6 +514,7 @@ where
                 self.outbox
                     .write_i32::<BigEndian>(request::OpCode::Ping as i32)
                     .expect("Vec::write should never fail");
+                trace!(logger, "sending heartbeat");
             } else {
                 // already request in flight, so no need to also send heartbeat
             }
@@ -484,12 +522,12 @@ where
             self.timer.reset(time::Instant::now() + self.timeout);
         }
 
-        eprintln!("poll_write");
-        let w = self.poll_write(exiting)?;
+        trace!(logger, "poll_read");
+        let w = self.poll_write(exiting, logger)?;
 
         match (r, w) {
             (Async::Ready(()), Async::Ready(())) if exiting => {
-                eprintln!("packetizer done");
+                debug!(logger, "packetizer done");
                 Ok(Async::Ready(()))
             }
             (Async::Ready(()), Async::Ready(())) => {
@@ -513,16 +551,19 @@ where
     fn poll(
         &mut self,
         exiting: bool,
+        logger: &mut slog::Logger,
         default_watcher: &mut mpsc::UnboundedSender<WatchedEvent>,
     ) -> Result<Async<()>, failure::Error> {
         let ap = match *self {
-            PacketizerState::Connected(ref mut ap) => return ap.poll(exiting, default_watcher),
+            PacketizerState::Connected(ref mut ap) => {
+                return ap.poll(exiting, logger, default_watcher)
+            }
             PacketizerState::Reconnecting(ref mut c) => try_ready!(c.poll()),
         };
 
         // we are now connected!
         mem::replace(self, PacketizerState::Connected(ap));
-        self.poll(exiting, default_watcher)
+        self.poll(exiting, logger, default_watcher)
     }
 }
 
@@ -536,7 +577,7 @@ where
                 Some((request, response)) => (request, response),
                 None => return Err(()),
             };
-            eprintln!("got request {:?}", item);
+            debug!(self.logger, "enqueueing request {:?}", item; "xid" => self.xid);
 
             match item {
                 Request::GetData {
@@ -564,9 +605,12 @@ where
                                 Request::Exists { .. } => WatchType::Exist,
                                 _ => unreachable!(),
                             };
-                            eprintln!(
-                                "adding pending watcher for xid {} on {} for {:?}",
-                                self.xid, path, wtype
+                            trace!(
+                                self.logger,
+                                "adding pending watcher";
+                                "xid" => self.xid,
+                                "path" => path,
+                                "wtype" => ?wtype
                             );
                             ap.pending_watchers
                                 .insert(self.xid, (path.to_string(), w, wtype));
@@ -593,9 +637,9 @@ where
     type Error = failure::Error;
 
     fn poll(&mut self) -> Result<Async<Self::Item>, Self::Error> {
-        eprintln!("packetizer polled");
+        trace!(self.logger, "packetizer polled");
         if !self.exiting {
-            eprintln!("poll_enqueue");
+            trace!(self.logger, "poll_enqueue");
             match self.poll_enqueue() {
                 Ok(_) => {}
                 Err(()) => {
@@ -623,7 +667,10 @@ where
             }
         }
 
-        match self.state.poll(self.exiting, &mut self.default_watcher) {
+        match self
+            .state
+            .poll(self.exiting, &mut self.logger, &mut self.default_watcher)
+        {
             Ok(v) => Ok(v),
             Err(e) => {
                 // if e is disconnect, then purge state and reconnect
@@ -647,9 +694,15 @@ where
                     ..
                 }) = self.state
                 {
+                    info!(self.logger, "connection lost; reconnecting";
+                          "session_id" => session_id,
+                          "last_zxid" => last_zxid_seen
+                    );
+
                     let xid = self.xid;
                     self.xid += 1;
 
+                    let log = self.logger.clone();
                     let retry = S::connect(&self.addr)
                         .map_err(|e| e.into())
                         .map(move |stream| {
@@ -661,11 +714,11 @@ where
                                 passwd: password,
                                 read_only: false,
                             };
-                            eprintln!("about to handshake (again)");
+                            trace!(log, "about to handshake (again)");
 
                             let (tx, rx) = oneshot::channel();
-                            tokio::spawn(rx.then(|r| {
-                                eprintln!("re-connection response: {:?}", r);
+                            tokio::spawn(rx.then(move |r| {
+                                trace!(log, "re-connection response: {:?}", r);
                                 Ok(())
                             }));
 

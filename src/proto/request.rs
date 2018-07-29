@@ -38,7 +38,7 @@ pub(crate) enum Request {
     },
 }
 
-#[derive(Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
 #[repr(i32)]
 #[allow(dead_code)]
 pub(super) enum OpCode {
