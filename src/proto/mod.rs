@@ -36,21 +36,25 @@ impl ZooKeeperTransport for tokio::net::TcpStream {
 }
 
 #[derive(Debug)]
-pub(crate) enum Task {
-    Request {
-        request: Request,
-        response: oneshot::Sender<Result<Response, ZkError>>,
-    },
-    AddWatcher {
-        path: String,
-        wtype: WatchType,
-        tx: oneshot::Sender<WatchedEvent>,
-    },
+pub(crate) enum Watch {
+    None,
+    Global,
+    Custom(oneshot::Sender<WatchedEvent>),
+}
+
+impl Watch {
+    pub(crate) fn to_u8(&self) -> u8 {
+        if let Watch::None = *self {
+            0
+        } else {
+            1
+        }
+    }
 }
 
 /// Describes what a `Watch` is looking for.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub enum WatchType {
+pub(crate) enum WatchType {
     /// Watching for changes to children.
     Child,
     /// Watching for changes to data.
@@ -60,7 +64,9 @@ pub enum WatchType {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct Enqueuer(mpsc::UnboundedSender<Task>);
+pub(crate) struct Enqueuer(
+    mpsc::UnboundedSender<(Request, oneshot::Sender<Result<Response, ZkError>>)>,
+);
 
 impl Enqueuer {
     // TODO: maybe:
@@ -70,10 +76,7 @@ impl Enqueuer {
         request: Request,
     ) -> impl Future<Item = Result<Response, ZkError>, Error = failure::Error> {
         let (tx, rx) = oneshot::channel();
-        match self.0.unbounded_send(Task::Request {
-            request,
-            response: tx,
-        }) {
+        match self.0.unbounded_send((request, tx)) {
             Ok(()) => {
                 Either::A(rx.map_err(|e| format_err!("failed to enqueue new request: {:?}", e)))
             }
@@ -81,17 +84,6 @@ impl Enqueuer {
                 Either::B(Err(format_err!("failed to enqueue new request: {:?}", e)).into_future())
             }
         }
-    }
-
-    pub(crate) fn add_watcher(
-        &self,
-        path: String,
-        wtype: WatchType,
-        tx: oneshot::Sender<WatchedEvent>,
-    ) {
-        self.0
-            .unbounded_send(Task::AddWatcher { path, wtype, tx })
-            .unwrap();
     }
 }
 
@@ -109,7 +101,7 @@ where
     default_watcher: mpsc::UnboundedSender<WatchedEvent>,
 
     /// Incoming requests
-    rx: mpsc::UnboundedReceiver<Task>,
+    rx: mpsc::UnboundedReceiver<(Request, oneshot::Sender<Result<Response, ZkError>>)>,
 
     /// Next xid to issue
     xid: i32,
@@ -174,8 +166,11 @@ struct ActivePacketizer<S> {
     /// What operation are we waiting for a response for?
     reply: HashMap<i32, (request::OpCode, oneshot::Sender<Result<Response, ZkError>>)>,
 
-    /// Custom registered watchers (path -> tx)
+    /// Custom registered watchers (path -> watcher)
     watchers: HashMap<String, Vec<(oneshot::Sender<WatchedEvent>, WatchType)>>,
+
+    /// Custom registered watchers (xid -> watcher to add when ok)
+    pending_watchers: HashMap<i32, (String, oneshot::Sender<WatchedEvent>, WatchType)>,
 
     first: bool,
 
@@ -202,6 +197,7 @@ where
             instart: 0,
             reply: Default::default(),
             watchers: Default::default(),
+            pending_watchers: Default::default(),
             first: true,
 
             last_zxid_seen: 0,
@@ -415,6 +411,20 @@ where
                     let (opcode, tx) = self.reply.remove(&xid).unwrap(); // TODO: return an error if xid was unknown
                     eprintln!("handling response to xid {} with opcode {:?}", xid, opcode);
 
+                    if let Some(w) = self.pending_watchers.remove(&xid) {
+                        // normally, watches are *only* added for successful operations
+                        // the exception to this is if an exists call fails with NoNode
+                        if err.is_none()
+                            || (opcode == request::OpCode::Exists && err == Some(ZkError::NoNode))
+                        {
+                            eprintln!("pending watcher for xid {} turned into real watcher", xid);
+                            self.watchers
+                                .entry(w.0)
+                                .or_insert_with(Vec::new)
+                                .push((w.1, w.2));
+                        }
+                    }
+
                     if let Some(e) = err {
                         tx.send(Err(e)).is_ok();
                     } else {
@@ -435,6 +445,7 @@ where
                             self.session_id = session_id;
                             mem::swap(&mut self.password, password);
                         }
+
                         tx.send(Ok(r)).is_ok(); // if receiver doesn't care, we don't either
                     }
                 }
@@ -485,7 +496,9 @@ where
                 eprintln!("packetizer done");
                 Ok(Async::Ready(()))
             }
-            (Async::Ready(()), Async::Ready(())) => bail!("Not exiting, but server closed connection"),
+            (Async::Ready(()), Async::Ready(())) => {
+                bail!("Not exiting, but server closed connection")
+            }
             (Async::Ready(()), _) => bail!("outstanding requests, but response channel closed"),
             _ => Ok(Async::NotReady),
         }
@@ -523,18 +536,51 @@ where
 {
     fn poll_enqueue(&mut self) -> Result<Async<()>, ()> {
         while let PacketizerState::Connected(ref mut ap) = self.state {
-            let (item, tx) = match try_ready!(self.rx.poll()) {
-                Some(Task::AddWatcher { path, wtype, tx }) => {
-                    ap.watchers
-                        .entry(path)
-                        .or_insert_with(Vec::new)
-                        .push((tx, wtype));
-                    continue;
-                }
-                Some(Task::Request { request, response }) => (request, response),
+            let (mut item, tx) = match try_ready!(self.rx.poll()) {
+                Some((request, response)) => (request, response),
                 None => return Err(()),
             };
             eprintln!("got request {:?}", item);
+
+            match item {
+                Request::GetData {
+                    ref path,
+                    ref mut watch,
+                    ..
+                }
+                | Request::GetChildren {
+                    ref path,
+                    ref mut watch,
+                    ..
+                }
+                | Request::Exists {
+                    ref path,
+                    ref mut watch,
+                    ..
+                } => {
+                    if let Watch::Custom(_) = *watch {
+                        // set to Global so that watch will be sent as 1u8
+                        let w = mem::replace(watch, Watch::Global);
+                        if let Watch::Custom(w) = w {
+                            let wtype = match item {
+                                Request::GetData { .. } => WatchType::Data,
+                                Request::GetChildren { .. } => WatchType::Child,
+                                Request::Exists { .. } => WatchType::Exist,
+                                _ => unreachable!(),
+                            };
+                            eprintln!(
+                                "adding pending watcher for xid {} on {} for {:?}",
+                                self.xid, path, wtype
+                            );
+                            ap.pending_watchers
+                                .insert(self.xid, (path.to_string(), w, wtype));
+                        } else {
+                            unreachable!();
+                        }
+                    }
+                }
+                _ => {}
+            }
 
             ap.enqueue(self.xid, item, tx);
             self.xid += 1;

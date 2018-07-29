@@ -120,89 +120,23 @@ impl ZooKeeper {
 }
 
 impl ZooKeeper {
-    pub fn watch(self) -> AndWatch {
-        AndWatch {
-            zk: self,
-            w: WatchSettings::Global,
-        }
+    pub fn watch(self) -> WatchGlobally {
+        WatchGlobally(self)
     }
 
-    pub fn with_watcher(
-        self,
-    ) -> (
-        AndWatch,
-        impl Future<Item = WatchedEvent, Error = futures::Canceled>,
-    ) {
-        let (tx, rx) = oneshot::channel();
-        let aw = AndWatch {
-            zk: self,
-            w: WatchSettings::Custom(tx),
-        };
-        (aw, rx)
+    pub fn with_watcher(self) -> WithWatcher {
+        WithWatcher(self)
     }
 
-    fn nowatch(self) -> AndWatch {
-        AndWatch {
-            zk: self,
-            w: WatchSettings::None,
-        }
-    }
-
-    pub fn exists(
+    fn exists_w(
         self,
         path: &str,
+        watch: Watch,
     ) -> impl Future<Item = (Self, Option<Stat>), Error = failure::Error> {
-        self.nowatch().exists(path)
-    }
-
-    pub fn get_children(
-        self,
-        path: &str,
-    ) -> impl Future<Item = (Self, Option<Vec<String>>), Error = failure::Error> {
-        self.nowatch().get_children(path)
-    }
-
-    pub fn get_data(
-        self,
-        path: &str,
-    ) -> impl Future<Item = (Self, Option<(Vec<u8>, Stat)>), Error = failure::Error> {
-        self.nowatch().get_data(path)
-    }
-}
-
-enum WatchSettings {
-    None,
-    Global,
-    Custom(oneshot::Sender<WatchedEvent>),
-}
-
-pub struct AndWatch {
-    zk: ZooKeeper,
-    w: WatchSettings,
-}
-
-impl AndWatch {
-    fn register_watcher(self, path: &str, wtype: WatchType) -> (ZooKeeper, bool) {
-        let AndWatch { zk, w } = self;
-        match w {
-            WatchSettings::None => (zk, false),
-            WatchSettings::Global => (zk, true),
-            WatchSettings::Custom(tx) => {
-                zk.connection.add_watcher(path.to_string(), wtype, tx);
-                (zk, true)
-            }
-        }
-    }
-
-    pub fn exists(
-        self,
-        path: &str,
-    ) -> impl Future<Item = (ZooKeeper, Option<Stat>), Error = failure::Error> {
-        let (zk, watch) = self.register_watcher(path, WatchType::Exist);
-        zk.connection
+        self.connection
             .enqueue(proto::Request::Exists {
                 path: path.to_string(),
-                watch: if watch { 1 } else { 0 },
+                watch,
             })
             .and_then(|r| match r {
                 Ok(proto::Response::Exists { stat }) => Ok(Some(stat)),
@@ -210,45 +144,140 @@ impl AndWatch {
                 Err(ZkError::NoNode) => Ok(None),
                 Err(e) => bail!("exists call failed: {:?}", e),
             })
-            .map(move |r| (zk, r))
+            .map(move |r| (self, r))
+    }
+
+    pub fn exists(
+        self,
+        path: &str,
+    ) -> impl Future<Item = (Self, Option<Stat>), Error = failure::Error> {
+        self.exists_w(path, Watch::None)
+    }
+
+    fn get_children_w(
+        self,
+        path: &str,
+        watch: Watch,
+    ) -> impl Future<Item = (Self, Option<Vec<String>>), Error = failure::Error> {
+        self.connection
+            .enqueue(proto::Request::GetChildren {
+                path: path.to_string(),
+                watch,
+            })
+            .and_then(|r| match r {
+                Ok(proto::Response::Strings(children)) => Ok(Some(children)),
+                Ok(r) => bail!("got non-strings response to get-children: {:?}", r),
+                Err(ZkError::NoNode) => Ok(None),
+                Err(e) => Err(format_err!("get-children call failed: {:?}", e)),
+            })
+            .map(move |r| (self, r))
+    }
+
+    pub fn get_children(
+        self,
+        path: &str,
+    ) -> impl Future<Item = (Self, Option<Vec<String>>), Error = failure::Error> {
+        self.get_children_w(path, Watch::None)
+    }
+
+    fn get_data_w(
+        self,
+        path: &str,
+        watch: Watch,
+    ) -> impl Future<Item = (Self, Option<(Vec<u8>, Stat)>), Error = failure::Error> {
+        self.connection
+            .enqueue(proto::Request::GetData {
+                path: path.to_string(),
+                watch,
+            })
+            .and_then(|r| match r {
+                Ok(proto::Response::GetData { bytes, stat }) => Ok(Some((bytes, stat))),
+                Ok(r) => bail!("got non-data response to get-data: {:?}", r),
+                Err(ZkError::NoNode) => Ok(None),
+                Err(e) => Err(format_err!("get-data call failed: {:?}", e)),
+            })
+            .map(move |r| (self, r))
+    }
+
+    pub fn get_data(
+        self,
+        path: &str,
+    ) -> impl Future<Item = (Self, Option<(Vec<u8>, Stat)>), Error = failure::Error> {
+        self.get_data_w(path, Watch::None)
+    }
+}
+
+pub struct WatchGlobally(ZooKeeper);
+
+impl WatchGlobally {
+    pub fn exists(
+        self,
+        path: &str,
+    ) -> impl Future<Item = (ZooKeeper, Option<Stat>), Error = failure::Error> {
+        self.0.exists_w(path, Watch::Global)
     }
 
     pub fn get_children(
         self,
         path: &str,
     ) -> impl Future<Item = (ZooKeeper, Option<Vec<String>>), Error = failure::Error> {
-        let (zk, watch) = self.register_watcher(path, WatchType::Child);
-        zk.connection
-            .enqueue(proto::Request::GetChildren {
-                path: path.to_string(),
-                watch: if watch { 1 } else { 0 },
-            })
-            .and_then(move |r| match r {
-                Ok(proto::Response::Strings(children)) => Ok(Some(children)),
-                Ok(r) => bail!("got non-strings response to get-children: {:?}", r),
-                Err(ZkError::NoNode) => Ok(None),
-                Err(e) => Err(format_err!("get-children call failed: {:?}", e)),
-            })
-            .map(move |r| (zk, r))
+        self.0.get_children_w(path, Watch::Global)
     }
 
     pub fn get_data(
         self,
         path: &str,
     ) -> impl Future<Item = (ZooKeeper, Option<(Vec<u8>, Stat)>), Error = failure::Error> {
-        let (zk, watch) = self.register_watcher(path, WatchType::Data);
-        zk.connection
-            .enqueue(proto::Request::GetData {
-                path: path.to_string(),
-                watch: if watch { 1 } else { 0 },
-            })
-            .and_then(move |r| match r {
-                Ok(proto::Response::GetData { bytes, stat }) => Ok(Some((bytes, stat))),
-                Ok(r) => bail!("got non-data response to get-data: {:?}", r),
-                Err(ZkError::NoNode) => Ok(None),
-                Err(e) => Err(format_err!("get-data call failed: {:?}", e)),
-            })
-            .map(move |r| (zk, r))
+        self.0.get_data_w(path, Watch::Global)
+    }
+}
+
+pub struct WithWatcher(ZooKeeper);
+
+impl WithWatcher {
+    pub fn exists(
+        self,
+        path: &str,
+    ) -> impl Future<
+        Item = (ZooKeeper, oneshot::Receiver<WatchedEvent>, Option<Stat>),
+        Error = failure::Error,
+    > {
+        let (tx, rx) = oneshot::channel();
+        self.0
+            .exists_w(path, Watch::Custom(tx))
+            .map(|r| (r.0, rx, r.1))
+    }
+
+    pub fn get_children(
+        self,
+        path: &str,
+    ) -> impl Future<
+        Item = (
+            ZooKeeper,
+            Option<(oneshot::Receiver<WatchedEvent>, Vec<String>)>,
+        ),
+        Error = failure::Error,
+    > {
+        let (tx, rx) = oneshot::channel();
+        self.0
+            .get_children_w(path, Watch::Custom(tx))
+            .map(|r| (r.0, r.1.map(move |c| (rx, c))))
+    }
+
+    pub fn get_data(
+        self,
+        path: &str,
+    ) -> impl Future<
+        Item = (
+            ZooKeeper,
+            Option<(oneshot::Receiver<WatchedEvent>, Vec<u8>, Stat)>,
+        ),
+        Error = failure::Error,
+    > {
+        let (tx, rx) = oneshot::channel();
+        self.0
+            .get_data_w(path, Watch::Custom(tx))
+            .map(|r| (r.0, r.1.map(move |(b, s)| (rx, b, s))))
     }
 }
 
@@ -262,23 +291,27 @@ mod tests {
         let (zk, w): (ZooKeeper, _) =
             rt.block_on(
                 ZooKeeper::connect(&"127.0.0.1:2181".parse().unwrap()).and_then(|(zk, w)| {
-                    let (fut, exists_w) = zk.with_watcher();
-                    fut.exists("/foo")
-                        .inspect(|(_, stat)| assert_eq!(stat, &None))
-                        .and_then(|(zk, _)| zk.watch().exists("/foo"))
-                        .inspect(|(_, stat)| assert_eq!(stat, &None))
-                        .and_then(|(zk, _)| {
+                    zk.with_watcher()
+                        .exists("/foo")
+                        .inspect(|(_, _, stat)| assert_eq!(stat, &None))
+                        .and_then(|(zk, exists_w, _)| {
+                            zk.watch()
+                                .exists("/foo")
+                                .map(move |(zk, x)| (zk, x, exists_w))
+                        })
+                        .inspect(|(_, stat, _)| assert_eq!(stat, &None))
+                        .and_then(|(zk, _, exists_w)| {
                             zk.create(
                                 "/foo",
                                 &b"Hello world"[..],
                                 Acl::open_unsafe(),
                                 CreateMode::Persistent,
-                            )
+                            ).map(move |(zk, x)| (zk, x, exists_w))
                         })
-                        .inspect(|(_, ref path)| {
+                        .inspect(|(_, ref path, _)| {
                             assert_eq!(path.as_ref().map(String::as_str), Ok("/foo"))
                         })
-                        .and_then(move |(zk, _)| {
+                        .and_then(move |(zk, _, exists_w)| {
                             exists_w
                                 .map(move |w| (zk, w))
                                 .map_err(|e| format_err!("exists_w failed: {:?}", e))

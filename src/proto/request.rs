@@ -1,3 +1,4 @@
+use super::Watch;
 use byteorder::{BigEndian, WriteBytesExt};
 use std::borrow::Cow;
 use std::io::{self, Write};
@@ -15,7 +16,7 @@ pub(crate) enum Request {
     },
     Exists {
         path: String,
-        watch: u8,
+        watch: Watch,
     },
     Delete {
         path: String,
@@ -29,11 +30,11 @@ pub(crate) enum Request {
     },
     GetChildren {
         path: String,
-        watch: u8,
+        watch: Watch,
     },
     GetData {
         path: String,
-        watch: u8,
+        watch: Watch,
     },
 }
 
@@ -128,12 +129,21 @@ impl Request {
                 buffer.write_all(passwd)?;
                 buffer.write_u8(read_only as u8)?;
             }
-            Request::GetData { ref path, watch }
-            | Request::GetChildren { ref path, watch }
-            | Request::Exists { ref path, watch } => {
+            Request::GetData {
+                ref path,
+                ref watch,
+            }
+            | Request::GetChildren {
+                ref path,
+                ref watch,
+            }
+            | Request::Exists {
+                ref path,
+                ref watch,
+            } => {
                 buffer.write_i32::<BigEndian>(self.opcode() as i32)?;
                 path.write_to(&mut *buffer)?;
-                buffer.write_u8(watch)?;
+                buffer.write_u8(watch.to_u8())?;
             }
             Request::Delete { ref path, version } => {
                 buffer.write_i32::<BigEndian>(OpCode::Delete as i32)?;
