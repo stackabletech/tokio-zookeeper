@@ -12,9 +12,7 @@ pub(crate) enum Response {
         password: Vec<u8>,
         read_only: bool,
     },
-    Exists {
-        stat: Stat,
-    },
+    Stat(Stat),
     GetData {
         bytes: Vec<u8>,
         stat: Stat,
@@ -114,9 +112,7 @@ impl Response {
                 password: reader.read_buffer()?,
                 read_only: reader.read_u8()? != 0,
             }),
-            OpCode::Exists => Ok(Response::Exists {
-                stat: Stat::read_from(&mut reader)?,
-            }),
+            OpCode::Exists | OpCode::SetData => Ok(Response::Stat(Stat::read_from(&mut reader)?)),
             OpCode::GetData => Ok(Response::GetData {
                 bytes: reader.read_buffer()?,
                 stat: Stat::read_from(&mut reader)?,

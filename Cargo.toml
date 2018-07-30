@@ -1,6 +1,6 @@
 [package]
 name = "tokio-zookeeper"
-version = "0.1.0"
+version = "0.1.1"
 
 description = "Asynchronous client library for interacting with Apache ZooKeeper"
 readme = "README.md"

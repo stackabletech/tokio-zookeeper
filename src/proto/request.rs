@@ -22,6 +22,11 @@ pub(crate) enum Request {
         path: String,
         version: i32,
     },
+    SetData {
+        path: String,
+        data: Cow<'static, [u8]>,
+        version: i32,
+    },
     Create {
         path: String,
         data: Cow<'static, [u8]>,
@@ -150,6 +155,16 @@ impl Request {
                 path.write_to(&mut *buffer)?;
                 buffer.write_i32::<BigEndian>(version)?;
             }
+            Request::SetData {
+                ref path,
+                ref data,
+                version,
+            } => {
+                buffer.write_i32::<BigEndian>(OpCode::SetData as i32)?;
+                path.write_to(&mut *buffer)?;
+                data.write_to(&mut *buffer)?;
+                buffer.write_i32::<BigEndian>(version)?;
+            }
             Request::Create {
                 ref path,
                 ref data,
@@ -173,6 +188,7 @@ impl Request {
             Request::Delete { .. } => OpCode::Delete,
             Request::Create { .. } => OpCode::Create,
             Request::GetChildren { .. } => OpCode::GetChildren,
+            Request::SetData { .. } => OpCode::SetData,
             Request::GetData { .. } => OpCode::GetData,
         }
     }
