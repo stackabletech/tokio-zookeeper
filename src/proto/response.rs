@@ -142,7 +142,9 @@ impl Response {
                 password: reader.read_buffer()?,
                 read_only: reader.read_u8()? != 0,
             }),
-            OpCode::Exists | OpCode::SetData => Ok(Response::Stat(Stat::read_from(&mut reader)?)),
+            OpCode::Exists | OpCode::SetData | OpCode::SetACL => {
+                Ok(Response::Stat(Stat::read_from(&mut reader)?))
+            }
             OpCode::GetData => Ok(Response::GetData {
                 bytes: reader.read_buffer()?,
                 stat: Stat::read_from(&mut reader)?,
@@ -150,7 +152,7 @@ impl Response {
             OpCode::Delete => Ok(Response::Empty),
             OpCode::GetChildren => Ok(Response::Strings(Vec::<String>::read_from(&mut reader)?)),
             OpCode::Create => Ok(Response::String(reader.read_string()?)),
-            OpCode::GetAcl => Ok(Response::GetAcl {
+            OpCode::GetACL => Ok(Response::GetAcl {
                 acl: Vec::<Acl>::read_from(&mut reader)?,
                 stat: Stat::read_from(&mut reader)?,
             }),

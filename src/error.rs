@@ -36,6 +36,11 @@ pub enum SetData {
         /// The expected node version.
         expected: i32,
     },
+
+    /// The target node's permission does not accept data modification or requires different
+    /// authentication to be altered.
+    #[fail(display = "insuficient authentication")]
+    NoAuth,
 }
 
 /// Errors that may cause a create request to fail.
@@ -64,4 +69,31 @@ pub enum GetAcl {
     /// No node exists with the given `path`.
     #[fail(display = "target node does not exist")]
     NoNode,
+}
+
+/// Errors that may cause a `set_acl` request to fail.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Fail)]
+pub enum SetAcl {
+    /// No node exists with the given `path`.
+    #[fail(display = "target node does not exist")]
+    NoNode,
+
+    /// The target node has a different version than was specified by the call to `set_acl`.
+    #[fail(
+        display = "target node has different version than expected ({})",
+        expected
+    )]
+    BadVersion {
+        /// The expected node version.
+        expected: i32,
+    },
+
+    /// The given ACL is invalid.
+    #[fail(display = "the given ACL is invalid")]
+    InvalidAcl,
+
+    /// The target node's permission does not accept acl modification or requires different
+    /// authentication to be altered.
+    #[fail(display = "insuficient authentication")]
+    NoAuth,
 }

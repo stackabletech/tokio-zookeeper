@@ -481,6 +481,7 @@ impl ZooKeeper {
                 Err(ZkError::BadVersion) => {
                     Ok(Err(error::SetData::BadVersion { expected: version }))
                 }
+                Err(ZkError::NoAuth) => Ok(Err(error::SetData::NoAuth)),
                 Err(e) => bail!("set_data call failed: {:?}", e),
             })
             .map(move |r| (self, r))
@@ -538,6 +539,45 @@ impl ZooKeeper {
                 Ok(r) => bail!("got non-acl response to a get_acl request: {:?}", r),
                 Err(ZkError::NoNode) => Ok(Err(error::GetAcl::NoNode)),
                 Err(e) => Err(format_err!("get_acl call failed: {:?}", e)),
+            })
+            .map(move |r| (self, r))
+    }
+
+    /// Set the ACL for the node of the given `path`.
+    ///
+    /// The call will succeed if such a node exists and the given `version` matches the ACL version
+    /// of the node. On success, the updated [`Stat`] of the node is returned.
+    ///
+    /// If no node exists for the given path, the returned future resolves with an error of
+    /// [`error::SetAcl::NoNode`]. If the given `version` does not match the ACL version, the
+    /// returned future resolves with an error of [`error::SetAcl::BadVersion`].
+    pub fn set_acl<A>(
+        self,
+        path: &str,
+        acl: A,
+        version: Option<i32>,
+    ) -> impl Future<Item = (Self, Result<Stat, error::SetAcl>), Error = failure::Error>
+    where
+        A: Into<Cow<'static, [Acl]>>,
+    {
+        trace!(self.logger, "set_acl"; "path" => path, "version" => ?version);
+        let version = version.unwrap_or(-1);
+        self.connection
+            .enqueue(proto::Request::SetAcl {
+                path: path.to_string(),
+                acl: acl.into(),
+                version,
+            })
+            .and_then(move |r| match r {
+                Ok(proto::Response::Stat(stat)) => Ok(Ok(stat)),
+                Ok(r) => bail!("got non-stat response to a set_acl request: {:?}", r),
+                Err(ZkError::NoNode) => Ok(Err(error::SetAcl::NoNode)),
+                Err(ZkError::BadVersion) => {
+                    Ok(Err(error::SetAcl::BadVersion { expected: version }))
+                }
+                Err(ZkError::InvalidACL) => Ok(Err(error::SetAcl::InvalidAcl)),
+                Err(ZkError::NoAuth) => Ok(Err(error::SetAcl::NoAuth)),
+                Err(e) => Err(format_err!("set_acl call failed: {:?}", e)),
             })
             .map(move |r| (self, r))
     }
@@ -825,14 +865,14 @@ mod tests {
                                     }
                                 );
                             })
-                            .and_then(|(zk, _)| zk.get_acl("/foo"))
-                            .inspect(|(_, res)| {
-                                let res = res.as_ref().unwrap();
-                                assert_eq!(res.0, Acl::open_unsafe());
-                            })
                             .and_then(|(zk, _)| zk.watch().exists("/foo"))
                             .inspect(|(_, stat)| {
                                 assert_eq!(stat.unwrap().data_length as usize, b"Hello world".len())
+                            })
+                            .and_then(|(zk, _)| zk.get_acl("/foo"))
+                            .inspect(|(_, res)| {
+                                let res = res.as_ref().unwrap();
+                                assert_eq!(res.0, Acl::open_unsafe())
                             })
                             .and_then(|(zk, _)| zk.get_data("/foo"))
                             .inspect(|(_, res)| {
@@ -1050,5 +1090,67 @@ mod tests {
                 .map(|_| ())
                 .map_err(|e| panic!("{:?}", e)),
         );
+    }
+
+    #[test]
+    fn acl_test() {
+        let mut rt = tokio::runtime::Runtime::new().unwrap();
+        let mut builder = ZooKeeperBuilder::default();
+        let decorator = slog_term::TermDecorator::new().build();
+        let drain = slog_term::FullFormat::new(decorator).build().fuse();
+        let drain = slog_async::Async::new(drain).build().fuse();
+        builder.set_logger(slog::Logger::root(drain, o!()));
+
+        let (zk, _): (ZooKeeper, _) =
+            rt.block_on(
+                builder
+                    .connect(&"127.0.0.1:2181".parse().unwrap())
+                    .and_then(|(zk, _)| {
+                        zk.create(
+                            "/acl_test",
+                            &b"foo"[..],
+                            Acl::open_unsafe(),
+                            CreateMode::Ephemeral,
+                        ).and_then(|(zk, _)| zk.get_acl("/acl_test"))
+                            .inspect(|(_, res)| {
+                                let res = res.as_ref().unwrap();
+                                assert_eq!(res.0, Acl::open_unsafe())
+                            })
+                            .and_then(|(zk, res)| {
+                                zk.set_acl(
+                                    "/acl_test",
+                                    Acl::creator_all(),
+                                    Some(res.unwrap().1.version),
+                                )
+                            })
+                            .inspect(|(_, res)| {
+                                // a not authenticated user is not able to set `auth` scheme acls.
+                                assert_eq!(res, &Err(error::SetAcl::InvalidAcl))
+                            })
+                            .and_then(|(zk, _)| zk.set_acl("/acl_test", Acl::read_unsafe(), None))
+                            .inspect(|(_, stat)| {
+                                // successfully change node acl to `read_unsafe`
+                                assert_eq!(stat.unwrap().data_length as usize, b"foo".len())
+                            })
+                            .and_then(|(zk, _)| zk.get_acl("/acl_test"))
+                            .inspect(|(_, res)| {
+                                let res = res.as_ref().unwrap();
+                                assert_eq!(res.0, Acl::read_unsafe())
+                            })
+                            .and_then(|(zk, _)| zk.set_data("/acl_test", None, &b"bar"[..]))
+                            .inspect(|(_, res)| {
+                                // cannot set data on a read only node
+                                assert_eq!(res, &Err(error::SetData::NoAuth))
+                            })
+                            .and_then(|(zk, _)| zk.set_acl("/acl_test", Acl::open_unsafe(), None))
+                            .inspect(|(_, res)| {
+                                // cannot change a read only node's acl
+                                assert_eq!(res, &Err(error::SetAcl::NoAuth))
+                            })
+                    }),
+            ).unwrap();
+
+        drop(zk); // make Packetizer idle
+        rt.shutdown_on_idle().wait().unwrap();
     }
 }
