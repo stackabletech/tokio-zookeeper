@@ -1,7 +1,7 @@
 use byteorder::{BigEndian, ReadBytesExt};
 use failure;
 use std::io::{self, Read};
-use {KeeperState, Stat, WatchedEvent, WatchedEventType};
+use {Acl, KeeperState, Permission, Stat, WatchedEvent, WatchedEventType};
 
 #[derive(Debug)]
 pub(crate) enum Response {
@@ -15,6 +15,10 @@ pub(crate) enum Response {
     Stat(Stat),
     GetData {
         bytes: Vec<u8>,
+        stat: Stat,
+    },
+    GetAcl {
+        acl: Vec<Acl>,
         stat: Stat,
     },
     Empty,
@@ -65,6 +69,32 @@ impl ReadFrom for WatchedEvent {
             keeper_state: KeeperState::from(state),
             path,
         })
+    }
+}
+
+impl ReadFrom for Vec<Acl> {
+    fn read_from<R: Read>(read: &mut R) -> io::Result<Self> {
+        let len = try!(read.read_i32::<BigEndian>());
+        let mut items = Vec::with_capacity(len as usize);
+        for _ in 0..len {
+            items.push(try!(Acl::read_from(read)));
+        }
+        Ok(items)
+    }
+}
+
+impl ReadFrom for Acl {
+    fn read_from<R: Read>(read: &mut R) -> io::Result<Self> {
+        let perms = try!(Permission::read_from(read));
+        let scheme = try!(read.read_string());
+        let id = try!(read.read_string());
+        Ok(Acl { perms, scheme, id })
+    }
+}
+
+impl ReadFrom for Permission {
+    fn read_from<R: Read>(read: &mut R) -> io::Result<Self> {
+        Ok(Permission::from_raw(try!(read.read_u32::<BigEndian>())))
     }
 }
 
@@ -120,6 +150,10 @@ impl Response {
             OpCode::Delete => Ok(Response::Empty),
             OpCode::GetChildren => Ok(Response::Strings(Vec::<String>::read_from(&mut reader)?)),
             OpCode::Create => Ok(Response::String(reader.read_string()?)),
+            OpCode::GetAcl => Ok(Response::GetAcl {
+                acl: Vec::<Acl>::read_from(&mut reader)?,
+                stat: Stat::read_from(&mut reader)?,
+            }),
             _ => unimplemented!(),
         }
     }

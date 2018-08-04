@@ -250,7 +250,7 @@ mod proto;
 mod types;
 
 use proto::{Watch, ZkError};
-pub use types::{Acl, CreateMode, KeeperState, Stat, WatchedEvent, WatchedEventType};
+pub use types::{Acl, CreateMode, KeeperState, Permission, Stat, WatchedEvent, WatchedEventType};
 
 /// A connection to ZooKeeper.
 ///
@@ -515,6 +515,29 @@ impl ZooKeeper {
                     Ok(Err(error::Delete::BadVersion { expected: version }))
                 }
                 Err(e) => Err(format_err!("delete call failed: {:?}", e)),
+            })
+            .map(move |r| (self, r))
+    }
+
+    /// Return the ACL and Stat of the node at the given `path`.
+    ///
+    /// If no node exists for the given path, the returned future resolves with an error of
+    /// [`error::GetAcl::NoNode`].
+    pub fn get_acl(
+        self,
+        path: &str,
+    ) -> impl Future<Item = (Self, Result<(Vec<Acl>, Stat), error::GetAcl>), Error = failure::Error>
+    {
+        trace!(self.logger, "get_acl"; "path" => path);
+        self.connection
+            .enqueue(proto::Request::GetAcl {
+                path: path.to_string(),
+            })
+            .and_then(move |r| match r {
+                Ok(proto::Response::GetAcl { acl, stat }) => Ok(Ok((acl, stat))),
+                Ok(r) => bail!("got non-acl response to a get_acl request: {:?}", r),
+                Err(ZkError::NoNode) => Ok(Err(error::GetAcl::NoNode)),
+                Err(e) => Err(format_err!("get_acl call failed: {:?}", e)),
             })
             .map(move |r| (self, r))
     }
@@ -801,6 +824,11 @@ mod tests {
                                         path: String::from("/foo"),
                                     }
                                 );
+                            })
+                            .and_then(|(zk, _)| zk.get_acl("/foo"))
+                            .inspect(|(_, res)| {
+                                let res = res.as_ref().unwrap();
+                                assert_eq!(res.0, Acl::open_unsafe());
                             })
                             .and_then(|(zk, _)| zk.watch().exists("/foo"))
                             .inspect(|(_, stat)| {

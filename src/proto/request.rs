@@ -41,6 +41,9 @@ pub(crate) enum Request {
         path: String,
         watch: Watch,
     },
+    GetAcl {
+        path: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
@@ -53,8 +56,8 @@ pub(super) enum OpCode {
     Exists = 3,
     GetData = 4,
     SetData = 5,
-    GetACL = 6,
-    SetACL = 7,
+    GetAcl = 6,
+    SetAcl = 7,
     GetChildren = 8,
     Synchronize = 9,
     Ping = 11,
@@ -177,6 +180,10 @@ impl Request {
                 write_list(&mut *buffer, acl)?;
                 buffer.write_i32::<BigEndian>(mode as i32)?;
             }
+            Request::GetAcl { ref path } => {
+                buffer.write_i32::<BigEndian>(OpCode::GetAcl as i32)?;
+                path.write_to(&mut *buffer)?;
+            }
         }
         Ok(())
     }
@@ -190,6 +197,7 @@ impl Request {
             Request::GetChildren { .. } => OpCode::GetChildren,
             Request::SetData { .. } => OpCode::SetData,
             Request::GetData { .. } => OpCode::GetData,
+            Request::GetAcl { .. } => OpCode::GetAcl,
         }
     }
 }

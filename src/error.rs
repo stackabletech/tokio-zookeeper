@@ -57,3 +57,11 @@ pub enum Create {
     #[fail(display = "the given ACL is invalid")]
     InvalidAcl,
 }
+
+/// Errors that may cause a `get_acl` request to fail.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Fail)]
+pub enum GetAcl {
+    /// No node exists with the given `path`.
+    #[fail(display = "target node does not exist")]
+    NoNode,
+}
