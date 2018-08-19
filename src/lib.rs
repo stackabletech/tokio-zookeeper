@@ -520,7 +520,8 @@ impl ZooKeeper {
             .map(move |r| (self, r))
     }
 
-    /// Return the ACL and Stat of the node at the given `path`.
+    /// Return the [ACL](https://zookeeper.apache.org/doc/current/zookeeperProgrammers.html#sc_ZooKeeperAccessControl)
+    /// and Stat of the node at the given `path`.
     ///
     /// If no node exists for the given path, the returned future resolves with an error of
     /// [`error::GetAcl::NoNode`].
@@ -543,7 +544,8 @@ impl ZooKeeper {
             .map(move |r| (self, r))
     }
 
-    /// Set the ACL for the node of the given `path`.
+    /// Set the [ACL](https://zookeeper.apache.org/doc/current/zookeeperProgrammers.html#sc_ZooKeeperAccessControl)
+    /// for the node of the given `path`.
     ///
     /// The call will succeed if such a node exists and the given `version` matches the ACL version
     /// of the node. On success, the updated [`Stat`] of the node is returned.

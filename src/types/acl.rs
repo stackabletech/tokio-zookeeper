@@ -143,7 +143,7 @@ mod tests {
 /// not recursive: If `/path` is only readable by a single user, but `/path/sub` is world-readable,
 /// then anyone will be able to read `/path/sub`.
 ///
-/// See the [ZooKeeper Programmer's Guide](https://zookeeper.apache.org/doc/trunk/zookeeperProgrammers.html#sc_ZooKeeperAccessControl)
+/// See the [ZooKeeper Programmer's Guide](https://zookeeper.apache.org/doc/current/zookeeperProgrammers.html#sc_ZooKeeperAccessControl)
 /// for more information.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Acl {

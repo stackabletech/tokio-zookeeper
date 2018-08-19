@@ -94,6 +94,6 @@ pub enum SetAcl {
 
     /// The target node's permission does not accept acl modification or requires different
     /// authentication to be altered.
-    #[fail(display = "insuficient authentication")]
+    #[fail(display = "insufficient authentication")]
     NoAuth,
 }
