@@ -41,6 +41,14 @@ pub(crate) enum Request {
         path: String,
         watch: Watch,
     },
+    GetAcl {
+        path: String,
+    },
+    SetAcl {
+        path: String,
+        acl: Cow<'static, [Acl]>,
+        version: i32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
@@ -177,6 +185,20 @@ impl Request {
                 write_list(&mut *buffer, acl)?;
                 buffer.write_i32::<BigEndian>(mode as i32)?;
             }
+            Request::GetAcl { ref path } => {
+                buffer.write_i32::<BigEndian>(OpCode::GetACL as i32)?;
+                path.write_to(&mut *buffer)?;
+            }
+            Request::SetAcl {
+                ref path,
+                ref acl,
+                version,
+            } => {
+                buffer.write_i32::<BigEndian>(OpCode::SetACL as i32)?;
+                path.write_to(&mut *buffer)?;
+                write_list(&mut *buffer, acl)?;
+                buffer.write_i32::<BigEndian>(version)?;
+            }
         }
         Ok(())
     }
@@ -190,6 +212,8 @@ impl Request {
             Request::GetChildren { .. } => OpCode::GetChildren,
             Request::SetData { .. } => OpCode::SetData,
             Request::GetData { .. } => OpCode::GetData,
+            Request::GetAcl { .. } => OpCode::GetACL,
+            Request::SetAcl { .. } => OpCode::SetACL,
         }
     }
 }
