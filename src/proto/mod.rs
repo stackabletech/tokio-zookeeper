@@ -30,7 +30,7 @@ pub trait ZooKeeperTransport: AsyncRead + AsyncWrite + Sized + Send {
 impl ZooKeeperTransport for tokio::net::TcpStream {
     type Addr = SocketAddr;
     type ConnectError = tokio::io::Error;
-    type ConnectFut = tokio::net::ConnectFuture;
+    type ConnectFut = tokio::net::tcp::ConnectFuture;
     fn connect(addr: &Self::Addr) -> Self::ConnectFut {
         tokio::net::TcpStream::connect(addr)
     }
