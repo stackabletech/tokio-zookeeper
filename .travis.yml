@@ -1,0 +1,32 @@
+language: rust
+rust:
+  - stable
+  - beta
+  - nightly
+matrix:
+  allow_failures:
+    - rust: nightly
+  fast_finish: true
+
+jdk:
+  - oraclejdk9
+
+sudo: false
+
+branches:
+  only:
+    - master
+
+before_install:
+  - export APACHE_MIRROR=http://apache.osuosl.org
+  - wget -O zookeeper.tar.gz ${APACHE_MIRROR}/zookeeper/zookeeper-${ZOOKEEPER_VERSION}/zookeeper-${ZOOKEEPER_VERSION}.tar.gz
+  - mkdir zookeeper
+  - tar -zxvf zookeeper.tar.gz -C zookeeper --strip-components 1
+
+before_script:
+  - ./travis/before_script.sh
+
+env:
+  matrix:
+    - ZOOKEEPER_VERSION=3.4.12
+    - ZOOKEEPER_VERSION=3.4.10
