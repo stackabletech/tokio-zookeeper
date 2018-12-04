@@ -1,6 +1,6 @@
 [package]
 name = "tokio-zookeeper"
-version = "0.1.2"
+version = "0.1.3"
 
 description = "Asynchronous client library for interacting with Apache ZooKeeper"
 readme = "README.md"
@@ -17,6 +17,7 @@ license = "MIT/Apache-2.0"
 
 [badges]
 travis-ci = { repository = "jonhoo/tokio-zookeeper" }
+maintenance = { status = "experimental" }
 
 [dependencies]
 futures = "0.1"
