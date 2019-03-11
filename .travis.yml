@@ -18,8 +18,7 @@ branches:
     - master
 
 before_install:
-  - export APACHE_MIRROR=http://apache.osuosl.org
-  - wget -O zookeeper.tar.gz ${APACHE_MIRROR}/zookeeper/zookeeper-${ZOOKEEPER_VERSION}/zookeeper-${ZOOKEEPER_VERSION}.tar.gz
+  - wget -O zookeeper.tar.gz http://archive.apache.org/dist/zookeeper/zookeeper-${ZOOKEEPER_VERSION}/zookeeper-${ZOOKEEPER_VERSION}.tar.gz
   - mkdir zookeeper
   - tar -zxvf zookeeper.tar.gz -C zookeeper --strip-components 1
 
@@ -28,5 +27,5 @@ before_script:
 
 env:
   matrix:
-    - ZOOKEEPER_VERSION=3.4.12
+    - ZOOKEEPER_VERSION=3.4.13
     - ZOOKEEPER_VERSION=3.4.10
