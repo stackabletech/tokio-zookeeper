@@ -4,6 +4,9 @@ pub use self::acl::*;
 mod watch;
 pub use self::watch::*;
 
+mod multi;
+pub use self::multi::*;
+
 /// Statistics about a znode, similar to the UNIX `stat` structure.
 ///
 /// # Time in ZooKeeper

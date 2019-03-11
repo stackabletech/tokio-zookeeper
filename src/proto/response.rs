@@ -1,3 +1,5 @@
+use super::error::ZkError;
+use super::request::{MultiHeader, OpCode};
 use byteorder::{BigEndian, ReadBytesExt};
 use failure;
 use std::io::{self, Read};
@@ -24,6 +26,7 @@ pub(crate) enum Response {
     Empty,
     Strings(Vec<String>),
     String(String),
+    Multi(Vec<Result<Response, ZkError>>),
 }
 
 pub trait ReadFrom: Sized {
@@ -98,6 +101,21 @@ impl ReadFrom for Permission {
     }
 }
 
+impl ReadFrom for MultiHeader {
+    fn read_from<R: Read>(read: &mut R) -> io::Result<Self> {
+        let opcode = read.read_i32::<BigEndian>()?;
+        let done = read.read_u8()? != 0;
+        let err = read.read_i32::<BigEndian>()?;
+        if done {
+            Ok(MultiHeader::Done)
+        } else if opcode == -1 {
+            Ok(MultiHeader::NextErr(err.into()))
+        } else {
+            Ok(MultiHeader::NextOk(opcode.into()))
+        }
+    }
+}
+
 pub trait BufferReader: Read {
     fn read_buffer(&mut self) -> io::Result<Vec<u8>>;
 }
@@ -130,10 +148,8 @@ impl<R: Read> StringReader for R {
     }
 }
 
-use super::request::OpCode;
 impl Response {
-    pub(super) fn parse(opcode: OpCode, buf: &[u8]) -> Result<Self, failure::Error> {
-        let mut reader = buf;
+    pub(super) fn parse(opcode: OpCode, reader: &mut &[u8]) -> Result<Self, failure::Error> {
         match opcode {
             OpCode::CreateSession => Ok(Response::Connect {
                 protocol_version: reader.read_i32::<BigEndian>()?,
@@ -143,20 +159,37 @@ impl Response {
                 read_only: reader.read_u8()? != 0,
             }),
             OpCode::Exists | OpCode::SetData | OpCode::SetACL => {
-                Ok(Response::Stat(Stat::read_from(&mut reader)?))
+                Ok(Response::Stat(Stat::read_from(reader)?))
             }
             OpCode::GetData => Ok(Response::GetData {
                 bytes: reader.read_buffer()?,
-                stat: Stat::read_from(&mut reader)?,
+                stat: Stat::read_from(reader)?,
             }),
             OpCode::Delete => Ok(Response::Empty),
-            OpCode::GetChildren => Ok(Response::Strings(Vec::<String>::read_from(&mut reader)?)),
+            OpCode::GetChildren => Ok(Response::Strings(Vec::<String>::read_from(reader)?)),
             OpCode::Create => Ok(Response::String(reader.read_string()?)),
             OpCode::GetACL => Ok(Response::GetAcl {
-                acl: Vec::<Acl>::read_from(&mut reader)?,
-                stat: Stat::read_from(&mut reader)?,
+                acl: Vec::<Acl>::read_from(reader)?,
+                stat: Stat::read_from(reader)?,
             }),
-            _ => unimplemented!(),
+            OpCode::Check => Ok(Response::Empty),
+            OpCode::Multi => {
+                let mut responses = Vec::new();
+                loop {
+                    match MultiHeader::read_from(reader)? {
+                        MultiHeader::NextErr(e) => {
+                            responses.push(Err(e));
+                            let _ = reader.read_i32::<BigEndian>()?;
+                        }
+                        MultiHeader::NextOk(opcode) => {
+                            responses.push(Ok(Response::parse(opcode, reader)?));
+                        }
+                        MultiHeader::Done => break,
+                    }
+                }
+                Ok(Response::Multi(responses))
+            }
+            _ => panic!("got unexpected response opcode {:?}", opcode),
         }
     }
 }
