@@ -1,3 +1,7 @@
+use super::{
+    active_packetizer::ActivePacketizer, request, watch::WatchType, Request, Response,
+    ZooKeeperTransport,
+};
 use byteorder::{BigEndian, WriteBytesExt};
 use failure;
 use futures::{
@@ -6,7 +10,6 @@ use futures::{
 };
 use slog;
 use std::mem;
-use super::{active_packetizer::ActivePacketizer, request, Request, Response, ZooKeeperTransport, watch::WatchType};
 use tokio;
 use tokio::prelude::*;
 use {Watch, WatchedEvent, ZkError};
@@ -293,4 +296,3 @@ impl Enqueuer {
         }
     }
 }
-

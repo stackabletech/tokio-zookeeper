@@ -1,10 +1,10 @@
+use super::{request, watch::WatchType, Request, Response};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use failure;
 use futures::sync::{mpsc, oneshot};
 use slog;
 use std::collections::HashMap;
 use std::{mem, time};
-use super::{request, Request, Response, watch::WatchType};
 use tokio;
 use tokio::prelude::*;
 use {WatchedEvent, WatchedEventType, ZkError};
@@ -35,21 +35,21 @@ pub(super) struct ActivePacketizer<S> {
     watchers: HashMap<String, Vec<(oneshot::Sender<WatchedEvent>, WatchType)>>,
 
     /// Custom registered watchers (xid -> watcher to add when ok)
-    pub pending_watchers: HashMap<i32, (String, oneshot::Sender<WatchedEvent>, WatchType)>,
+    pub(super) pending_watchers: HashMap<i32, (String, oneshot::Sender<WatchedEvent>, WatchType)>,
 
     first: bool,
 
     /// Fields for re-connection
-    pub last_zxid_seen: i64,
-    pub session_id: i64,
-    pub password: Vec<u8>,
+    pub(super) last_zxid_seen: i64,
+    pub(super) session_id: i64,
+    pub(super) password: Vec<u8>,
 }
 
 impl<S> ActivePacketizer<S>
 where
     S: AsyncRead + AsyncWrite,
 {
-    pub fn new(stream: S) -> Self {
+    pub(super) fn new(stream: S) -> Self {
         ActivePacketizer {
             stream,
             timer: tokio::timer::Delay::new(
@@ -79,7 +79,12 @@ where
         self.inbox.len() - self.instart
     }
 
-    pub fn enqueue(&mut self, xid: i32, item: Request, tx: oneshot::Sender<Result<Response, ZkError>>) {
+    pub(super) fn enqueue(
+        &mut self,
+        xid: i32,
+        item: Request,
+        tx: oneshot::Sender<Result<Response, ZkError>>,
+    ) {
         let lengthi = self.outbox.len();
         // dummy length
         self.outbox.push(0);
@@ -354,7 +359,7 @@ where
         }
     }
 
-    pub fn poll(
+    pub(super) fn poll(
         &mut self,
         exiting: bool,
         logger: &mut slog::Logger,
