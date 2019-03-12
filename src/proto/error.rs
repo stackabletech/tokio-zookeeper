@@ -38,6 +38,8 @@ pub enum ZkError {
     NotReadOnly = -119,
     /// Attempt to remove a non-existing watcher.
     NoWatcher = -121,
+    /// No error occurred.
+    Ok = 0,
     /// Operation timeout.
     OperationTimeout = -7,
     /// A runtime inconsistency was found.
@@ -74,13 +76,14 @@ impl From<i32> for ZkError {
             -111 => ZkError::NotEmpty,
             -119 => ZkError::NotReadOnly,
             -121 => ZkError::NoWatcher,
+            0 => ZkError::Ok,
             -7 => ZkError::OperationTimeout,
             -2 => ZkError::RuntimeInconsistency,
             -112 => ZkError::SessionExpired,
             -118 => ZkError::SessionMoved,
             -1 => ZkError::SystemError,
             -6 => ZkError::Unimplemented,
-            _ => unimplemented!(),
+            _ => panic!("unknown error code {}", code),
         }
     }
 }

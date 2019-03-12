@@ -101,6 +101,10 @@ where
             self.outbox
                 .write_i32::<BigEndian>(xid)
                 .expect("Vec::write should never fail");
+            // opcode
+            self.outbox
+                .write_i32::<BigEndian>(item.opcode() as i32)
+                .expect("Vec::write should never fail");
         }
 
         // type and payload
@@ -220,9 +224,9 @@ where
                         assert!(zxid >= self.last_zxid_seen);
                         self.last_zxid_seen = zxid;
                     }
-                    let errcode = buf.read_i32::<BigEndian>()?;
-                    if errcode != 0 {
-                        err = Some(ZkError::from(errcode));
+                    let zk_err: ZkError = buf.read_i32::<BigEndian>()?.into();
+                    if zk_err != ZkError::Ok {
+                        err = Some(zk_err);
                     }
                     xid
                 };
@@ -323,7 +327,7 @@ where
 
                         tx.send(Err(e)).is_ok();
                     } else {
-                        let mut r = Response::parse(opcode, buf)?;
+                        let mut r = Response::parse(opcode, &mut buf)?;
 
                         debug!(logger,
                                "handling server response: {:?}", r;

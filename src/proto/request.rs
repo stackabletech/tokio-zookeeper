@@ -1,4 +1,5 @@
 use super::Watch;
+use super::ZkError;
 use byteorder::{BigEndian, WriteBytesExt};
 use std::borrow::Cow;
 use std::io::{self, Write};
@@ -49,6 +50,11 @@ pub(crate) enum Request {
         acl: Cow<'static, [Acl]>,
         version: i32,
     },
+    Check {
+        path: String,
+        version: i32,
+    },
+    Multi(Vec<Request>),
 }
 
 #[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
@@ -77,6 +83,40 @@ pub(super) enum OpCode {
     Error = -1,
 }
 
+impl From<i32> for OpCode {
+    fn from(code: i32) -> Self {
+        match code {
+            0 => OpCode::Notification,
+            1 => OpCode::Create,
+            2 => OpCode::Delete,
+            3 => OpCode::Exists,
+            4 => OpCode::GetData,
+            5 => OpCode::SetData,
+            6 => OpCode::GetACL,
+            7 => OpCode::SetACL,
+            8 => OpCode::GetChildren,
+            9 => OpCode::Synchronize,
+            11 => OpCode::Ping,
+            12 => OpCode::GetChildren2,
+            13 => OpCode::Check,
+            14 => OpCode::Multi,
+            100 => OpCode::Auth,
+            101 => OpCode::SetWatches,
+            102 => OpCode::Sasl,
+            -10 => OpCode::CreateSession,
+            -11 => OpCode::CloseSession,
+            -1 => OpCode::Error,
+            _ => unimplemented!(),
+        }
+    }
+}
+
+pub(super) enum MultiHeader {
+    NextOk(OpCode),
+    NextErr(ZkError),
+    Done,
+}
+
 pub trait WriteTo {
     fn write_to<W: Write>(&self, writer: W) -> io::Result<()>;
 }
@@ -86,6 +126,26 @@ impl WriteTo for Acl {
         writer.write_u32::<BigEndian>(self.perms.code())?;
         self.scheme.write_to(&mut writer)?;
         self.id.write_to(writer)
+    }
+}
+
+impl WriteTo for MultiHeader {
+    fn write_to<W: Write>(&self, mut writer: W) -> io::Result<()> {
+        match *self {
+            MultiHeader::NextOk(opcode) => {
+                writer.write_i32::<BigEndian>(opcode as i32)?;
+                writer.write_u8(false as u8)?;
+                writer.write_i32::<BigEndian>(-1)
+            }
+            MultiHeader::NextErr(_) => {
+                panic!("client should not serialize MultiHeader::NextErr");
+            }
+            MultiHeader::Done => {
+                writer.write_i32::<BigEndian>(-1)?;
+                writer.write_u8(true as u8)?;
+                writer.write_i32::<BigEndian>(-1)
+            }
+        }
     }
 }
 
@@ -133,7 +193,6 @@ impl Request {
                 ref passwd,
                 read_only,
             } => {
-                // buffer.write_i32(OpCode::Auth);
                 buffer.write_i32::<BigEndian>(protocol_version)?;
                 buffer.write_i64::<BigEndian>(last_zxid_seen)?;
                 buffer.write_i32::<BigEndian>(timeout)?;
@@ -154,12 +213,10 @@ impl Request {
                 ref path,
                 ref watch,
             } => {
-                buffer.write_i32::<BigEndian>(self.opcode() as i32)?;
                 path.write_to(&mut *buffer)?;
                 buffer.write_u8(watch.to_u8())?;
             }
             Request::Delete { ref path, version } => {
-                buffer.write_i32::<BigEndian>(OpCode::Delete as i32)?;
                 path.write_to(&mut *buffer)?;
                 buffer.write_i32::<BigEndian>(version)?;
             }
@@ -168,7 +225,6 @@ impl Request {
                 ref data,
                 version,
             } => {
-                buffer.write_i32::<BigEndian>(OpCode::SetData as i32)?;
                 path.write_to(&mut *buffer)?;
                 data.write_to(&mut *buffer)?;
                 buffer.write_i32::<BigEndian>(version)?;
@@ -179,14 +235,12 @@ impl Request {
                 mode,
                 ref acl,
             } => {
-                buffer.write_i32::<BigEndian>(OpCode::Create as i32)?;
                 path.write_to(&mut *buffer)?;
                 data.write_to(&mut *buffer)?;
                 write_list(&mut *buffer, acl)?;
                 buffer.write_i32::<BigEndian>(mode as i32)?;
             }
             Request::GetAcl { ref path } => {
-                buffer.write_i32::<BigEndian>(OpCode::GetACL as i32)?;
                 path.write_to(&mut *buffer)?;
             }
             Request::SetAcl {
@@ -194,10 +248,20 @@ impl Request {
                 ref acl,
                 version,
             } => {
-                buffer.write_i32::<BigEndian>(OpCode::SetACL as i32)?;
                 path.write_to(&mut *buffer)?;
                 write_list(&mut *buffer, acl)?;
                 buffer.write_i32::<BigEndian>(version)?;
+            }
+            Request::Check { ref path, version } => {
+                path.write_to(&mut *buffer)?;
+                buffer.write_i32::<BigEndian>(version)?;
+            }
+            Request::Multi(ref requests) => {
+                for r in requests {
+                    MultiHeader::NextOk(r.opcode()).write_to(&mut *buffer)?;
+                    r.serialize_into(&mut *buffer)?;
+                }
+                MultiHeader::Done.write_to(&mut *buffer)?;
             }
         }
         Ok(())
@@ -214,6 +278,8 @@ impl Request {
             Request::GetData { .. } => OpCode::GetData,
             Request::GetAcl { .. } => OpCode::GetACL,
             Request::SetAcl { .. } => OpCode::SetACL,
+            Request::Multi { .. } => OpCode::Multi,
+            Request::Check { .. } => OpCode::Check,
         }
     }
 }

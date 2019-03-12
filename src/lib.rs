@@ -247,10 +247,13 @@ use tokio::prelude::*;
 /// Per-operation ZooKeeper error types.
 pub mod error;
 mod proto;
+mod transform;
 mod types;
 
 use proto::{Watch, ZkError};
-pub use types::{Acl, CreateMode, KeeperState, Permission, Stat, WatchedEvent, WatchedEventType};
+pub use types::{
+    Acl, CreateMode, KeeperState, MultiResponse, Permission, Stat, WatchedEvent, WatchedEventType,
+};
 
 /// A connection to ZooKeeper.
 ///
@@ -432,17 +435,7 @@ impl ZooKeeper {
                 acl: acl.into(),
                 mode,
             })
-            .and_then(move |r| match r {
-                Ok(proto::Response::String(s)) => Ok(Ok(s)),
-                Ok(r) => bail!("got non-string response to create: {:?}", r),
-                Err(ZkError::NoNode) => Ok(Err(error::Create::NoNode)),
-                Err(ZkError::NodeExists) => Ok(Err(error::Create::NodeExists)),
-                Err(ZkError::InvalidACL) => Ok(Err(error::Create::InvalidAcl)),
-                Err(ZkError::NoChildrenForEphemerals) => {
-                    Ok(Err(error::Create::NoChildrenForEphemerals))
-                }
-                Err(e) => Err(format_err!("create call failed: {:?}", e)),
-            })
+            .and_then(transform::create)
             .map(move |r| (self, r))
     }
 
@@ -474,16 +467,7 @@ impl ZooKeeper {
                 version,
                 data,
             })
-            .and_then(move |r| match r {
-                Ok(proto::Response::Stat(stat)) => Ok(Ok(stat)),
-                Ok(r) => bail!("got a non-stat response to a set_data request: {:?}", r),
-                Err(ZkError::NoNode) => Ok(Err(error::SetData::NoNode)),
-                Err(ZkError::BadVersion) => {
-                    Ok(Err(error::SetData::BadVersion { expected: version }))
-                }
-                Err(ZkError::NoAuth) => Ok(Err(error::SetData::NoAuth)),
-                Err(e) => bail!("set_data call failed: {:?}", e),
-            })
+            .and_then(move |r| transform::set_data(version, r))
             .map(move |r| (self, r))
     }
 
@@ -507,16 +491,7 @@ impl ZooKeeper {
                 path: path.to_string(),
                 version: version,
             })
-            .and_then(move |r| match r {
-                Ok(proto::Response::Empty) => Ok(Ok(())),
-                Ok(r) => bail!("got non-empty response to delete: {:?}", r),
-                Err(ZkError::NoNode) => Ok(Err(error::Delete::NoNode)),
-                Err(ZkError::NotEmpty) => Ok(Err(error::Delete::NotEmpty)),
-                Err(ZkError::BadVersion) => {
-                    Ok(Err(error::Delete::BadVersion { expected: version }))
-                }
-                Err(e) => Err(format_err!("delete call failed: {:?}", e)),
-            })
+            .and_then(move |r| transform::delete(version, r))
             .map(move |r| (self, r))
     }
 
@@ -535,12 +510,7 @@ impl ZooKeeper {
             .enqueue(proto::Request::GetAcl {
                 path: path.to_string(),
             })
-            .and_then(move |r| match r {
-                Ok(proto::Response::GetAcl { acl, stat }) => Ok(Ok((acl, stat))),
-                Ok(r) => bail!("got non-acl response to a get_acl request: {:?}", r),
-                Err(ZkError::NoNode) => Ok(Err(error::GetAcl::NoNode)),
-                Err(e) => Err(format_err!("get_acl call failed: {:?}", e)),
-            })
+            .and_then(transform::get_acl)
             .map(move |r| (self, r))
     }
 
@@ -570,17 +540,7 @@ impl ZooKeeper {
                 acl: acl.into(),
                 version,
             })
-            .and_then(move |r| match r {
-                Ok(proto::Response::Stat(stat)) => Ok(Ok(stat)),
-                Ok(r) => bail!("got non-stat response to a set_acl request: {:?}", r),
-                Err(ZkError::NoNode) => Ok(Err(error::SetAcl::NoNode)),
-                Err(ZkError::BadVersion) => {
-                    Ok(Err(error::SetAcl::BadVersion { expected: version }))
-                }
-                Err(ZkError::InvalidACL) => Ok(Err(error::SetAcl::InvalidAcl)),
-                Err(ZkError::NoAuth) => Ok(Err(error::SetAcl::NoAuth)),
-                Err(e) => Err(format_err!("set_acl call failed: {:?}", e)),
-            })
+            .and_then(move |r| transform::set_acl(version, r))
             .map(move |r| (self, r))
     }
 }
@@ -608,12 +568,7 @@ impl ZooKeeper {
                 path: path.to_string(),
                 watch,
             })
-            .and_then(|r| match r {
-                Ok(proto::Response::Stat(stat)) => Ok(Some(stat)),
-                Ok(r) => bail!("got a non-create response to a create request: {:?}", r),
-                Err(ZkError::NoNode) => Ok(None),
-                Err(e) => bail!("exists call failed: {:?}", e),
-            })
+            .and_then(transform::exists)
             .map(move |r| (self, r))
     }
 
@@ -636,12 +591,7 @@ impl ZooKeeper {
                 path: path.to_string(),
                 watch,
             })
-            .and_then(|r| match r {
-                Ok(proto::Response::Strings(children)) => Ok(Some(children)),
-                Ok(r) => bail!("got non-strings response to get-children: {:?}", r),
-                Err(ZkError::NoNode) => Ok(None),
-                Err(e) => Err(format_err!("get-children call failed: {:?}", e)),
-            })
+            .and_then(transform::get_children)
             .map(move |r| (self, r))
     }
 
@@ -668,12 +618,7 @@ impl ZooKeeper {
                 path: path.to_string(),
                 watch,
             })
-            .and_then(|r| match r {
-                Ok(proto::Response::GetData { bytes, stat }) => Ok(Some((bytes, stat))),
-                Ok(r) => bail!("got non-data response to get-data: {:?}", r),
-                Err(ZkError::NoNode) => Ok(None),
-                Err(e) => Err(format_err!("get-data call failed: {:?}", e)),
-            })
+            .and_then(transform::get_data)
             .map(move |r| (self, r))
     }
 
@@ -684,6 +629,15 @@ impl ZooKeeper {
         path: &str,
     ) -> impl Future<Item = (Self, Option<(Vec<u8>, Stat)>), Error = failure::Error> {
         self.get_data_w(path, Watch::None)
+    }
+
+    /// Start building a multi request. Multi requests batch several operations
+    /// into one atomic unit.
+    pub fn multi(self) -> MultiBuilder {
+        MultiBuilder {
+            zk: self,
+            requests: Vec::new(),
+        }
     }
 }
 
@@ -809,6 +763,91 @@ impl WithWatcher {
         self.0
             .get_data_w(path, Watch::Custom(tx))
             .map(|r| (r.0, r.1.map(move |(b, s)| (rx, b, s))))
+    }
+}
+
+/// Proxy for [`ZooKeeper`] that batches operations into an atomic "multi" request.
+#[derive(Debug)]
+pub struct MultiBuilder {
+    zk: ZooKeeper,
+    requests: Vec<proto::Request>,
+}
+
+impl MultiBuilder {
+    /// Attach a create operation to this multi request.
+    ///
+    /// See [`ZooKeeper::create`] for details.
+    pub fn create<D, A>(mut self, path: &str, data: D, acl: A, mode: CreateMode) -> Self
+    where
+        D: Into<Cow<'static, [u8]>>,
+        A: Into<Cow<'static, [Acl]>>,
+    {
+        self.requests.push(proto::Request::Create {
+            path: path.to_string(),
+            data: data.into(),
+            acl: acl.into(),
+            mode: mode,
+        });
+        self
+    }
+
+    /// Attach a set data operation to this multi request.
+    ///
+    /// See [`ZooKeeper::set_data`] for details.
+    pub fn set_data<D>(mut self, path: &str, version: Option<i32>, data: D) -> Self
+    where
+        D: Into<Cow<'static, [u8]>>,
+    {
+        self.requests.push(proto::Request::SetData {
+            path: path.to_string(),
+            version: version.unwrap_or(-1),
+            data: data.into(),
+        });
+        self
+    }
+
+    /// Attach a delete operation to this multi request.
+    ///
+    /// See [`ZooKeeper::delete`] for details.
+    pub fn delete(mut self, path: &str, version: Option<i32>) -> Self {
+        self.requests.push(proto::Request::Delete {
+            path: path.to_string(),
+            version: version.unwrap_or(-1),
+        });
+        self
+    }
+
+    /// Attach a check operation to this multi request.
+    ///
+    /// There is no equivalent to the check operation outside of a multi
+    /// request.
+    pub fn check(mut self, path: &str, version: i32) -> Self {
+        self.requests.push(proto::Request::Check {
+            path: path.to_string(),
+            version,
+        });
+        self
+    }
+
+    /// Run executes the attached requests in one atomic unit.
+    pub fn run(
+        self,
+    ) -> impl Future<Item = (ZooKeeper, Vec<Result<MultiResponse, error::Multi>>), Error = failure::Error>
+    {
+        let (zk, requests) = (self.zk, self.requests);
+        let reqs_lite: Vec<transform::RequestMarker> = requests.iter().map(|r| r.into()).collect();
+        zk.connection
+            .enqueue(proto::Request::Multi(requests))
+            .and_then(move |r| match r {
+                Ok(proto::Response::Multi(responses)) => reqs_lite
+                    .iter()
+                    .zip(responses)
+                    .map(|(req, res)| transform::multi(req, res))
+                    .collect(),
+                Ok(r) => bail!("got non-multi response to multi: {:?}", r),
+                Err(e) => Err(format_err!("multi call failed: {:?}", e)),
+            })
+            .map(move |r| (zk, r))
     }
 }
 
@@ -1151,6 +1190,125 @@ mod tests {
                             })
                     }),
             ).unwrap();
+
+        drop(zk); // make Packetizer idle
+        rt.shutdown_on_idle().wait().unwrap();
+    }
+
+    #[test]
+    fn multi_test() {
+        let mut rt = tokio::runtime::Runtime::new().unwrap();
+        let mut builder = ZooKeeperBuilder::default();
+        let decorator = slog_term::TermDecorator::new().build();
+        let drain = slog_term::FullFormat::new(decorator).build().fuse();
+        let drain = slog_async::Async::new(drain).build().fuse();
+        builder.set_logger(slog::Logger::root(drain, o!()));
+
+        let check_exists = |zk: ZooKeeper, paths: &'static [&'static str]| {
+            let mut fut: Box<
+                futures::Future<Item = (ZooKeeper, Vec<bool>), Error = failure::Error> + Send,
+            > = Box::new(futures::future::ok((zk, Vec::new())));
+            for p in paths {
+                fut = Box::new(fut.and_then(move |(zk, mut v)| {
+                    zk.exists(p).map(|(zk, stat)| {
+                        v.push(stat.is_some());
+                        (zk, v)
+                    })
+                }))
+            }
+            fut
+        };
+
+        let (zk, _): (ZooKeeper, _) = rt
+            .block_on(
+                builder
+                    .connect(&"127.0.0.1:2181".parse().unwrap())
+                    .and_then(|(zk, _)| {
+                        zk.multi()
+                            .create("/b", &b"a"[..], Acl::open_unsafe(), CreateMode::Persistent)
+                            .create("/c", &b"b"[..], Acl::open_unsafe(), CreateMode::Persistent)
+                            .run()
+                    })
+                    .inspect(|(_, res)| {
+                        assert_eq!(
+                            res,
+                            &[
+                                Ok(MultiResponse::Create("/b".into())),
+                                Ok(MultiResponse::Create("/c".into()))
+                            ]
+                        )
+                    })
+                    .and_then(move |(zk, _)| check_exists(zk, &["/a", "/b", "/c", "/d"]))
+                    .inspect(|(_, res)| assert_eq!(res, &[false, true, true, false]))
+                    .and_then(|(zk, _)| {
+                        zk.multi()
+                            .create("/a", &b"a"[..], Acl::open_unsafe(), CreateMode::Persistent)
+                            .create("/b", &b"b"[..], Acl::open_unsafe(), CreateMode::Persistent)
+                            .create("/c", &b"b"[..], Acl::open_unsafe(), CreateMode::Persistent)
+                            .create("/d", &b"a"[..], Acl::open_unsafe(), CreateMode::Persistent)
+                            .run()
+                    })
+                    .inspect(|(_, res)| {
+                        assert_eq!(
+                            res,
+                            &[
+                                Err(error::Multi::RolledBack),
+                                Err(error::Multi::Create(error::Create::NodeExists)),
+                                Err(error::Multi::Skipped),
+                                Err(error::Multi::Skipped),
+                            ]
+                        )
+                    })
+                    .and_then(move |(zk, _)| check_exists(zk, &["/a", "/b", "/c", "/d"]))
+                    .inspect(|(_, res)| assert_eq!(res, &[false, true, true, false]))
+                    .and_then(|(zk, _)| zk.multi().set_data("/b", None, &b"garbaggio"[..]).run())
+                    .inspect(|(_, res)| match res[0] {
+                        Ok(MultiResponse::SetData(stat)) => {
+                            assert_eq!(stat.data_length as usize, "garbaggio".len())
+                        }
+                        _ => panic!("unexpected response: {:?}", res),
+                    })
+                    .and_then(|(zk, _)| zk.multi().check("/b", 0).delete("/c", None).run())
+                    .inspect(|(_, res)| {
+                        assert_eq!(
+                            res,
+                            &[
+                                Err(error::Multi::Check(error::Check::BadVersion {
+                                    expected: 0
+                                })),
+                                Err(error::Multi::Skipped),
+                            ]
+                        )
+                    })
+                    .and_then(move |(zk, _)| check_exists(zk, &["/a", "/b", "/c", "/d"]))
+                    .inspect(|(_, res)| assert_eq!(res, &[false, true, true, false]))
+                    .and_then(|(zk, _)| zk.multi().check("/a", 0).run())
+                    .inspect(|(_, res)| {
+                        assert_eq!(res, &[Err(error::Multi::Check(error::Check::NoNode)),])
+                    })
+                    .and_then(|(zk, _)| {
+                        zk.multi()
+                            .check("/b", 1)
+                            .delete("/b", None)
+                            .check("/c", 0)
+                            .delete("/c", None)
+                            .run()
+                    })
+                    .inspect(|(_, res)| {
+                        assert_eq!(
+                            res,
+                            &[
+                                Ok(MultiResponse::Check),
+                                Ok(MultiResponse::Delete),
+                                Ok(MultiResponse::Check),
+                                Ok(MultiResponse::Delete),
+                            ]
+                        )
+                    })
+                    .and_then(move |(zk, _)| check_exists(zk, &["/a", "/b", "/c", "/d"]))
+                    .inspect(|(_, res)| assert_eq!(res, &[false, false, false, false])),
+            )
+            .unwrap();
 
         drop(zk); // make Packetizer idle
         rt.shutdown_on_idle().wait().unwrap();
