@@ -17,7 +17,7 @@ pub(super) struct ActivePacketizer<S> {
     timeout: time::Duration,
 
     /// Bytes we have not yet set.
-    pub outbox: Vec<u8>,
+    pub(super) outbox: Vec<u8>,
 
     /// Prefix of outbox that has been sent.
     outstart: usize,
