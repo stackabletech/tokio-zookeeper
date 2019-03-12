@@ -109,6 +109,14 @@ pub(crate) fn check(
     }
 }
 
+/// The subset of [`proto::Request`] that a multi request needs to retain.
+///
+/// In order to properly handle errors, a multi request needs to retain the
+/// expected version for each constituent set data, delete, or check operation.
+/// Unfortunately, executing a multi request requires transferring ownership of
+/// the `proto::Request`, which contains this information, to the future. A
+/// `RequestMarker` is used to avoid cloning the whole `proto::Request`, which
+/// can be rather large, when only the version information is necessary.
 #[derive(Debug)]
 pub(crate) enum RequestMarker {
     Create,
