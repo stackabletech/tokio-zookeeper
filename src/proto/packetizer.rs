@@ -2,17 +2,14 @@ use super::{
     active_packetizer::ActivePacketizer, request, watch::WatchType, Request, Response,
     ZooKeeperTransport,
 };
+use crate::{Watch, WatchedEvent, ZkError};
 use byteorder::{BigEndian, WriteBytesExt};
-use failure;
 use futures::{
     future::Either,
     sync::{mpsc, oneshot},
 };
-use slog;
 use std::mem;
-use tokio;
 use tokio::prelude::*;
-use {Watch, WatchedEvent, ZkError};
 
 pub(crate) struct Packetizer<S>
 where

@@ -250,8 +250,8 @@ mod proto;
 mod transform;
 mod types;
 
-use proto::{Watch, ZkError};
-pub use types::{
+use crate::proto::{Watch, ZkError};
+pub use crate::types::{
     Acl, CreateMode, KeeperState, MultiResponse, Permission, Stat, WatchedEvent, WatchedEventType,
 };
 
@@ -1210,7 +1210,7 @@ mod tests {
 
         let check_exists = |zk: ZooKeeper, paths: &'static [&'static str]| {
             let mut fut: Box<
-                futures::Future<Item = (ZooKeeper, Vec<bool>), Error = failure::Error> + Send,
+                dyn futures::Future<Item = (ZooKeeper, Vec<bool>), Error = failure::Error> + Send,
             > = Box::new(futures::future::ok((zk, Vec::new())));
             for p in paths {
                 fut = Box::new(fut.and_then(move |(zk, mut v)| {

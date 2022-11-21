@@ -3,7 +3,7 @@ use super::ZkError;
 use byteorder::{BigEndian, WriteBytesExt};
 use std::borrow::Cow;
 use std::io::{self, Write};
-use {Acl, CreateMode};
+use crate::{Acl, CreateMode};
 
 #[derive(Debug)]
 pub(crate) enum Request {

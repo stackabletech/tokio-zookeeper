@@ -1,6 +1,4 @@
-use failure;
 use std::net::SocketAddr;
-use tokio;
 use tokio::prelude::*;
 
 mod active_packetizer;

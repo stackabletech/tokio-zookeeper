@@ -1,9 +1,8 @@
 use super::error::ZkError;
 use super::request::{MultiHeader, OpCode};
+use crate::{Acl, KeeperState, Permission, Stat, WatchedEvent, WatchedEventType};
 use byteorder::{BigEndian, ReadBytesExt};
-use failure;
 use std::io::{self, Read};
-use {Acl, KeeperState, Permission, Stat, WatchedEvent, WatchedEventType};
 
 #[derive(Debug)]
 pub(crate) enum Response {

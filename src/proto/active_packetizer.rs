@@ -1,13 +1,10 @@
 use super::{request, watch::WatchType, Request, Response};
+use crate::{WatchedEvent, WatchedEventType, ZkError};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use failure;
 use futures::sync::{mpsc, oneshot};
-use slog;
 use std::collections::HashMap;
 use std::{mem, time};
-use tokio;
 use tokio::prelude::*;
-use {WatchedEvent, WatchedEventType, ZkError};
 
 pub(super) struct ActivePacketizer<S> {
     stream: S,
