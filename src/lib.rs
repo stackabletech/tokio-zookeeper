@@ -1049,72 +1049,61 @@ mod tests {
         );
     }
 
-    #[test]
-    fn acl_test() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+    #[tokio::test]
+    async fn acl_test() {
         let mut builder = ZooKeeperBuilder::default();
         let decorator = slog_term::TermDecorator::new().build();
         let drain = slog_term::FullFormat::new(decorator).build().fuse();
         let drain = slog_async::Async::new(drain).build().fuse();
         builder.set_logger(slog::Logger::root(drain, o!()));
 
-        let (zk, _): (ZooKeeper, _) = rt
-            .block_on(
-                builder
-                    .connect(&"127.0.0.1:2181".parse().unwrap())
-                    .and_then(|(zk, _)| {
-                        zk.create(
-                            "/acl_test",
-                            &b"foo"[..],
-                            Acl::open_unsafe(),
-                            CreateMode::Ephemeral,
-                        )
-                        .and_then(|(zk, _)| zk.get_acl("/acl_test"))
-                        .inspect_ok(|(_, res)| {
-                            let res = res.as_ref().unwrap();
-                            assert_eq!(res.0, Acl::open_unsafe())
-                        })
-                        .and_then(|(zk, res)| {
-                            zk.set_acl(
-                                "/acl_test",
-                                Acl::creator_all(),
-                                Some(res.unwrap().1.version),
-                            )
-                        })
-                        .inspect_ok(|(_, res)| {
-                            // a not authenticated user is not able to set `auth` scheme acls.
-                            assert_eq!(res, &Err(error::SetAcl::InvalidAcl))
-                        })
-                        .and_then(|(zk, _)| zk.set_acl("/acl_test", Acl::read_unsafe(), None))
-                        .inspect_ok(|(_, stat)| {
-                            // successfully change node acl to `read_unsafe`
-                            assert_eq!(stat.unwrap().data_length as usize, b"foo".len())
-                        })
-                        .and_then(|(zk, _)| zk.get_acl("/acl_test"))
-                        .inspect_ok(|(_, res)| {
-                            let res = res.as_ref().unwrap();
-                            assert_eq!(res.0, Acl::read_unsafe())
-                        })
-                        .and_then(|(zk, _)| zk.set_data("/acl_test", None, &b"bar"[..]))
-                        .inspect_ok(|(_, res)| {
-                            // cannot set data on a read only node
-                            assert_eq!(res, &Err(error::SetData::NoAuth))
-                        })
-                        .and_then(|(zk, _)| zk.set_acl("/acl_test", Acl::open_unsafe(), None))
-                        .inspect_ok(|(_, res)| {
-                            // cannot change a read only node's acl
-                            assert_eq!(res, &Err(error::SetAcl::NoAuth))
-                        })
-                    }),
+        let (zk, _) = (builder.connect(&"127.0.0.1:2181".parse().unwrap()))
+            .await
+            .unwrap();
+        let (zk, _) = zk
+            .create(
+                "/acl_test",
+                &b"foo"[..],
+                Acl::open_unsafe(),
+                CreateMode::Ephemeral,
             )
+            .await
             .unwrap();
 
+        let (zk, res) = zk.get_acl("/acl_test").await.unwrap();
+        let res = res.unwrap();
+        assert_eq!(res.0, Acl::open_unsafe());
+
+        let (zk, res) = zk
+            .set_acl("/acl_test", Acl::creator_all(), Some(res.1.version))
+            .await
+            .unwrap();
+        // a not authenticated user is not able to set `auth` scheme acls.
+        assert_eq!(res, Err(error::SetAcl::InvalidAcl));
+
+        let (zk, stat) = zk
+            .set_acl("/acl_test", Acl::read_unsafe(), None)
+            .await
+            .unwrap();
+        // successfully change node acl to `read_unsafe`
+        assert_eq!(stat.unwrap().data_length as usize, b"foo".len());
+
+        let (zk, res) = zk.get_acl("/acl_test").await.unwrap();
+        let res = res.unwrap();
+        assert_eq!(res.0, Acl::read_unsafe());
+
+        let (zk, res) = zk.set_data("/acl_test", None, &b"bar"[..]).await.unwrap();
+        // cannot set data on a read only node
+        assert_eq!(res, Err(error::SetData::NoAuth));
+
+        let (zk, res) = zk
+            .set_acl("/acl_test", Acl::open_unsafe(), None)
+            .await
+            .unwrap();
+        // cannot change a read only node's acl
+        assert_eq!(res, Err(error::SetAcl::NoAuth));
+
         drop(zk); // make Packetizer idle
-        drop(rt);
-        // rt.shutdown_on_idle().wait().unwrap();
     }
 
     #[test]
