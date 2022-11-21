@@ -837,7 +837,6 @@ impl MultiBuilder {
 
 #[cfg(test)]
 mod tests {
-    use std::pin::Pin;
 
     use super::*;
 
@@ -1106,128 +1105,126 @@ mod tests {
         drop(zk); // make Packetizer idle
     }
 
-    #[test]
-    fn multi_test() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+    #[tokio::test]
+    async fn multi_test() {
         let mut builder = ZooKeeperBuilder::default();
         let decorator = slog_term::TermDecorator::new().build();
         let drain = slog_term::FullFormat::new(decorator).build().fuse();
         let drain = slog_async::Async::new(drain).build().fuse();
         builder.set_logger(slog::Logger::root(drain, o!()));
 
-        let check_exists = |zk: ZooKeeper, paths: &'static [&'static str]| {
-            let mut fut: Pin<
-                Box<
-                    dyn futures::Future<Output = Result<(ZooKeeper, Vec<bool>), failure::Error>>
-                        + Send,
-                >,
-            > = Box::pin(futures::future::ok((zk, Vec::new())));
+        let check_exists = |mut zk: ZooKeeper, paths: &'static [&'static str]| async move {
+            let mut res = Vec::new();
             for p in paths {
-                fut = Box::pin(fut.and_then(move |(zk, mut v)| {
-                    zk.exists(p).map_ok(|(zk, stat)| {
-                        v.push(stat.is_some());
-                        (zk, v)
-                    })
-                }))
+                let (zk2, exists) = zk.exists(p).await?;
+                zk = zk2;
+                res.push(exists.is_some());
             }
-            fut
+            Result::<_, failure::Error>::Ok((zk, res))
         };
 
-        let (zk, _): (ZooKeeper, _) = rt
-            .block_on(
-                builder
-                    .connect(&"127.0.0.1:2181".parse().unwrap())
-                    .and_then(|(zk, _)| {
-                        zk.multi()
-                            .create("/b", &b"a"[..], Acl::open_unsafe(), CreateMode::Persistent)
-                            .create("/c", &b"b"[..], Acl::open_unsafe(), CreateMode::Persistent)
-                            .run()
-                    })
-                    .inspect_ok(|(_, res)| {
-                        assert_eq!(
-                            res,
-                            &[
-                                Ok(MultiResponse::Create("/b".into())),
-                                Ok(MultiResponse::Create("/c".into()))
-                            ]
-                        )
-                    })
-                    .and_then(move |(zk, _)| check_exists(zk, &["/a", "/b", "/c", "/d"]))
-                    .inspect_ok(|(_, res)| assert_eq!(res, &[false, true, true, false]))
-                    .and_then(|(zk, _)| {
-                        zk.multi()
-                            .create("/a", &b"a"[..], Acl::open_unsafe(), CreateMode::Persistent)
-                            .create("/b", &b"b"[..], Acl::open_unsafe(), CreateMode::Persistent)
-                            .create("/c", &b"b"[..], Acl::open_unsafe(), CreateMode::Persistent)
-                            .create("/d", &b"a"[..], Acl::open_unsafe(), CreateMode::Persistent)
-                            .run()
-                    })
-                    .inspect_ok(|(_, res)| {
-                        assert_eq!(
-                            res,
-                            &[
-                                Err(error::Multi::RolledBack),
-                                Err(error::Multi::Create(error::Create::NodeExists)),
-                                Err(error::Multi::Skipped),
-                                Err(error::Multi::Skipped),
-                            ]
-                        )
-                    })
-                    .and_then(move |(zk, _)| check_exists(zk, &["/a", "/b", "/c", "/d"]))
-                    .inspect_ok(|(_, res)| assert_eq!(res, &[false, true, true, false]))
-                    .and_then(|(zk, _)| zk.multi().set_data("/b", None, &b"garbaggio"[..]).run())
-                    .inspect_ok(|(_, res)| match res[0] {
-                        Ok(MultiResponse::SetData(stat)) => {
-                            assert_eq!(stat.data_length as usize, "garbaggio".len())
-                        }
-                        _ => panic!("unexpected response: {:?}", res),
-                    })
-                    .and_then(|(zk, _)| zk.multi().check("/b", 0).delete("/c", None).run())
-                    .inspect_ok(|(_, res)| {
-                        assert_eq!(
-                            res,
-                            &[
-                                Err(error::Multi::Check(error::Check::BadVersion {
-                                    expected: 0
-                                })),
-                                Err(error::Multi::Skipped),
-                            ]
-                        )
-                    })
-                    .and_then(move |(zk, _)| check_exists(zk, &["/a", "/b", "/c", "/d"]))
-                    .inspect_ok(|(_, res)| assert_eq!(res, &[false, true, true, false]))
-                    .and_then(|(zk, _)| zk.multi().check("/a", 0).run())
-                    .inspect_ok(|(_, res)| {
-                        assert_eq!(res, &[Err(error::Multi::Check(error::Check::NoNode)),])
-                    })
-                    .and_then(|(zk, _)| {
-                        zk.multi()
-                            .check("/b", 1)
-                            .delete("/b", None)
-                            .check("/c", 0)
-                            .delete("/c", None)
-                            .run()
-                    })
-                    .inspect_ok(|(_, res)| {
-                        assert_eq!(
-                            res,
-                            &[
-                                Ok(MultiResponse::Check),
-                                Ok(MultiResponse::Delete),
-                                Ok(MultiResponse::Check),
-                                Ok(MultiResponse::Delete),
-                            ]
-                        )
-                    })
-                    .and_then(move |(zk, _)| check_exists(zk, &["/a", "/b", "/c", "/d"]))
-                    .inspect_ok(|(_, res)| assert_eq!(res, &[false, false, false, false])),
-            )
+        let (zk, _) = builder
+            .connect(&"127.0.0.1:2181".parse().unwrap())
+            .await
             .unwrap();
 
+        let (zk, res) = zk
+            .multi()
+            .create("/b", &b"a"[..], Acl::open_unsafe(), CreateMode::Persistent)
+            .create("/c", &b"b"[..], Acl::open_unsafe(), CreateMode::Persistent)
+            .run()
+            .await
+            .unwrap();
+        assert_eq!(
+            res,
+            [
+                Ok(MultiResponse::Create("/b".into())),
+                Ok(MultiResponse::Create("/c".into()))
+            ]
+        );
+
+        let (zk, res) = check_exists(zk, &["/a", "/b", "/c", "/d"]).await.unwrap();
+        assert_eq!(res, &[false, true, true, false]);
+
+        let (zk, res) = zk
+            .multi()
+            .create("/a", &b"a"[..], Acl::open_unsafe(), CreateMode::Persistent)
+            .create("/b", &b"b"[..], Acl::open_unsafe(), CreateMode::Persistent)
+            .create("/c", &b"b"[..], Acl::open_unsafe(), CreateMode::Persistent)
+            .create("/d", &b"a"[..], Acl::open_unsafe(), CreateMode::Persistent)
+            .run()
+            .await
+            .unwrap();
+        assert_eq!(
+            res,
+            &[
+                Err(error::Multi::RolledBack),
+                Err(error::Multi::Create(error::Create::NodeExists)),
+                Err(error::Multi::Skipped),
+                Err(error::Multi::Skipped),
+            ]
+        );
+
+        let (zk, res) = check_exists(zk, &["/a", "/b", "/c", "/d"]).await.unwrap();
+        assert_eq!(res, &[false, true, true, false]);
+
+        let (zk, res) = zk
+            .multi()
+            .set_data("/b", None, &b"garbaggio"[..])
+            .run()
+            .await
+            .unwrap();
+        match res[0] {
+            Ok(MultiResponse::SetData(stat)) => {
+                assert_eq!(stat.data_length as usize, "garbaggio".len())
+            }
+            _ => panic!("unexpected response: {:?}", res),
+        }
+
+        let (zk, res) = zk
+            .multi()
+            .check("/b", 0)
+            .delete("/c", None)
+            .run()
+            .await
+            .unwrap();
+        assert_eq!(
+            res,
+            [
+                Err(error::Multi::Check(error::Check::BadVersion {
+                    expected: 0
+                })),
+                Err(error::Multi::Skipped),
+            ]
+        );
+
+        let (zk, res) = check_exists(zk, &["/a", "/b", "/c", "/d"]).await.unwrap();
+        assert_eq!(res, &[false, true, true, false]);
+        let (zk, res) = zk.multi().check("/a", 0).run().await.unwrap();
+        assert_eq!(res, &[Err(error::Multi::Check(error::Check::NoNode)),]);
+
+        let (zk, res) = zk
+            .multi()
+            .check("/b", 1)
+            .delete("/b", None)
+            .check("/c", 0)
+            .delete("/c", None)
+            .run()
+            .await
+            .unwrap();
+        assert_eq!(
+            res,
+            [
+                Ok(MultiResponse::Check),
+                Ok(MultiResponse::Delete),
+                Ok(MultiResponse::Check),
+                Ok(MultiResponse::Delete),
+            ]
+        );
+
+        let (zk, res) = check_exists(zk, &["/a", "/b", "/c", "/d"]).await.unwrap();
+        assert_eq!(res, [false, false, false, false]);
+
         drop(zk); // make Packetizer idle
-        drop(rt);
     }
 }
