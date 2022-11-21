@@ -1,7 +1,10 @@
 use super::{request, watch::WatchType, Request, Response};
 use crate::{WatchedEvent, WatchedEventType, ZkError};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use failure::bail;
 use futures::sync::{mpsc, oneshot};
+use futures::try_ready;
+use slog::{debug, info, trace};
 use std::collections::HashMap;
 use std::{mem, time};
 use tokio::prelude::*;

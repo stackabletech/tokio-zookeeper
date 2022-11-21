@@ -1,3 +1,5 @@
+use failure::{bail, format_err};
+
 use crate::proto::{Request, Response, ZkError};
 use crate::{error, Acl, MultiResponse, Stat};
 

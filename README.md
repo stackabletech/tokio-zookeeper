@@ -106,11 +106,6 @@ explicitly create a `tokio::Runtime` and then use `Runtime::block_on`.
 ## A somewhat silly example
 
 ```rust
-extern crate tokio;
-#[macro_use]
-extern crate failure;
-extern crate tokio_zookeeper;
-
 use tokio_zookeeper::*;
 use tokio::prelude::*;
 

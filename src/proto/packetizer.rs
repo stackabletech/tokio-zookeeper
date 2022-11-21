@@ -4,10 +4,13 @@ use super::{
 };
 use crate::{Watch, WatchedEvent, ZkError};
 use byteorder::{BigEndian, WriteBytesExt};
+use failure::format_err;
 use futures::{
     future::Either,
     sync::{mpsc, oneshot},
+    try_ready,
 };
+use slog::{debug, error, info, trace};
 use std::mem;
 use tokio::prelude::*;
 

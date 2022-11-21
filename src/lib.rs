@@ -100,11 +100,6 @@
 //! # A somewhat silly example
 //!
 //! ```no_run
-//! extern crate tokio;
-//! #[macro_use]
-//! extern crate failure;
-//! extern crate tokio_zookeeper;
-//!
 //! use tokio_zookeeper::*;
 //! use tokio::prelude::*;
 //!
@@ -223,22 +218,9 @@
 #![deny(missing_debug_implementations)]
 #![deny(missing_copy_implementations)]
 
-extern crate byteorder;
-#[macro_use]
-extern crate failure;
-#[macro_use]
-extern crate futures;
-extern crate tokio;
-#[macro_use]
-extern crate lazy_static;
-#[macro_use]
-extern crate slog;
-#[cfg(test)]
-extern crate slog_async;
-#[cfg(test)]
-extern crate slog_term;
-
+use failure::{bail, format_err};
 use futures::sync::oneshot;
+use slog::{debug, o, trace};
 use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::time;
