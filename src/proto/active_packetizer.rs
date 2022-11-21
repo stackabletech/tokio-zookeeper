@@ -191,7 +191,8 @@ where
                         }
 
                         if self.inlen() >= 4 && need == 4 {
-                            let length = (&mut &self.inbox[self.instart..]).read_i32::<BigEndian>()?
+                            let length = (&mut &self.inbox[self.instart..])
+                                .read_i32::<BigEndian>()?
                                 as usize;
                             need += length;
                         }
@@ -325,7 +326,7 @@ where
                                "handling server error response: {:?}", e;
                                "xid" => xid, "opcode" => ?opcode);
 
-                        tx.send(Err(e)).is_ok();
+                        let _ = tx.send(Err(e));
                     } else {
                         let mut r = Response::parse(opcode, &mut buf)?;
 
@@ -351,7 +352,7 @@ where
                             mem::swap(&mut self.password, password);
                         }
 
-                        tx.send(Ok(r)).is_ok(); // if receiver doesn't care, we don't either
+                        let _ = tx.send(Ok(r)); // if receiver doesn't care, we don't either
                     }
                 }
             }

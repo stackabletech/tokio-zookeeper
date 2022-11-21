@@ -60,10 +60,11 @@ where
                 state: PacketizerState::Connected(ActivePacketizer::new(stream)),
                 xid: 0,
                 default_watcher,
-                rx: rx,
+                rx,
                 logger: log,
                 exiting: false,
-            }.map_err(move |e| {
+            }
+            .map_err(move |e| {
                 error!(exitlogger, "packetizer exiting: {:?}", e);
                 drop(e);
             }),
@@ -75,7 +76,9 @@ where
 
 enum PacketizerState<S> {
     Connected(ActivePacketizer<S>),
-    Reconnecting(Box<Future<Item = ActivePacketizer<S>, Error = failure::Error> + Send + 'static>),
+    Reconnecting(
+        Box<dyn Future<Item = ActivePacketizer<S>, Error = failure::Error> + Send + 'static>,
+    ),
 }
 
 impl<S> PacketizerState<S>
@@ -96,7 +99,7 @@ where
         };
 
         // we are now connected!
-        mem::replace(self, PacketizerState::Connected(ap));
+        *self = PacketizerState::Connected(ap);
         self.poll(exiting, logger, default_watcher)
     }
 }
@@ -262,10 +265,7 @@ where
                         });
 
                     // dropping the old state will also cancel in-flight requests
-                    mem::replace(
-                        &mut self.state,
-                        PacketizerState::Reconnecting(Box::new(retry)),
-                    );
+                    self.state = PacketizerState::Reconnecting(Box::new(retry));
                     self.poll()
                 } else {
                     unreachable!();

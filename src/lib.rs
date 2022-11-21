@@ -323,7 +323,7 @@ impl ZooKeeperBuilder {
         Error = failure::Error,
     > {
         let (tx, rx) = futures::sync::mpsc::unbounded();
-        let addr = addr.clone();
+        let addr = *addr;
         tokio::net::TcpStream::connect(&addr)
             .map_err(failure::Error::from)
             .and_then(move |stream| self.handshake(addr, stream, tx))
@@ -431,7 +431,7 @@ impl ZooKeeper {
         self.connection
             .enqueue(proto::Request::Create {
                 path: path.to_string(),
-                data: data,
+                data,
                 acl: acl.into(),
                 mode,
             })
@@ -489,7 +489,7 @@ impl ZooKeeper {
         self.connection
             .enqueue(proto::Request::Delete {
                 path: path.to_string(),
-                version: version,
+                version,
             })
             .and_then(move |r| transform::delete(version, r))
             .map(move |r| (self, r))
@@ -786,7 +786,7 @@ impl MultiBuilder {
             path: path.to_string(),
             data: data.into(),
             acl: acl.into(),
-            mode: mode,
+            mode,
         });
         self
     }
@@ -866,8 +866,8 @@ mod tests {
         let drain = slog_async::Async::new(drain).build().fuse();
         builder.set_logger(slog::Logger::root(drain, o!()));
 
-        let (zk, w): (ZooKeeper, _) =
-            rt.block_on(
+        let (zk, w): (ZooKeeper, _) = rt
+            .block_on(
                 builder
                     .connect(&"127.0.0.1:2181".parse().unwrap())
                     .and_then(|(zk, w)| {
@@ -886,7 +886,8 @@ mod tests {
                                     &b"Hello world"[..],
                                     Acl::open_unsafe(),
                                     CreateMode::Persistent,
-                                ).map(move |(zk, x)| (zk, x, exists_w))
+                                )
+                                .map(move |(zk, x)| (zk, x, exists_w))
                             })
                             .inspect(|(_, ref path, _)| {
                                 assert_eq!(path.as_ref().map(String::as_str), Ok("/foo"))
@@ -1015,7 +1016,8 @@ mod tests {
                             })
                             .map(|(zk, (_, w))| (zk, w))
                     }),
-            ).unwrap();
+            )
+            .unwrap();
 
         drop(zk); // make Packetizer idle
         rt.shutdown_on_idle().wait().unwrap();
@@ -1142,8 +1144,8 @@ mod tests {
         let drain = slog_async::Async::new(drain).build().fuse();
         builder.set_logger(slog::Logger::root(drain, o!()));
 
-        let (zk, _): (ZooKeeper, _) =
-            rt.block_on(
+        let (zk, _): (ZooKeeper, _) = rt
+            .block_on(
                 builder
                     .connect(&"127.0.0.1:2181".parse().unwrap())
                     .and_then(|(zk, _)| {
@@ -1152,44 +1154,46 @@ mod tests {
                             &b"foo"[..],
                             Acl::open_unsafe(),
                             CreateMode::Ephemeral,
-                        ).and_then(|(zk, _)| zk.get_acl("/acl_test"))
-                            .inspect(|(_, res)| {
-                                let res = res.as_ref().unwrap();
-                                assert_eq!(res.0, Acl::open_unsafe())
-                            })
-                            .and_then(|(zk, res)| {
-                                zk.set_acl(
-                                    "/acl_test",
-                                    Acl::creator_all(),
-                                    Some(res.unwrap().1.version),
-                                )
-                            })
-                            .inspect(|(_, res)| {
-                                // a not authenticated user is not able to set `auth` scheme acls.
-                                assert_eq!(res, &Err(error::SetAcl::InvalidAcl))
-                            })
-                            .and_then(|(zk, _)| zk.set_acl("/acl_test", Acl::read_unsafe(), None))
-                            .inspect(|(_, stat)| {
-                                // successfully change node acl to `read_unsafe`
-                                assert_eq!(stat.unwrap().data_length as usize, b"foo".len())
-                            })
-                            .and_then(|(zk, _)| zk.get_acl("/acl_test"))
-                            .inspect(|(_, res)| {
-                                let res = res.as_ref().unwrap();
-                                assert_eq!(res.0, Acl::read_unsafe())
-                            })
-                            .and_then(|(zk, _)| zk.set_data("/acl_test", None, &b"bar"[..]))
-                            .inspect(|(_, res)| {
-                                // cannot set data on a read only node
-                                assert_eq!(res, &Err(error::SetData::NoAuth))
-                            })
-                            .and_then(|(zk, _)| zk.set_acl("/acl_test", Acl::open_unsafe(), None))
-                            .inspect(|(_, res)| {
-                                // cannot change a read only node's acl
-                                assert_eq!(res, &Err(error::SetAcl::NoAuth))
-                            })
+                        )
+                        .and_then(|(zk, _)| zk.get_acl("/acl_test"))
+                        .inspect(|(_, res)| {
+                            let res = res.as_ref().unwrap();
+                            assert_eq!(res.0, Acl::open_unsafe())
+                        })
+                        .and_then(|(zk, res)| {
+                            zk.set_acl(
+                                "/acl_test",
+                                Acl::creator_all(),
+                                Some(res.unwrap().1.version),
+                            )
+                        })
+                        .inspect(|(_, res)| {
+                            // a not authenticated user is not able to set `auth` scheme acls.
+                            assert_eq!(res, &Err(error::SetAcl::InvalidAcl))
+                        })
+                        .and_then(|(zk, _)| zk.set_acl("/acl_test", Acl::read_unsafe(), None))
+                        .inspect(|(_, stat)| {
+                            // successfully change node acl to `read_unsafe`
+                            assert_eq!(stat.unwrap().data_length as usize, b"foo".len())
+                        })
+                        .and_then(|(zk, _)| zk.get_acl("/acl_test"))
+                        .inspect(|(_, res)| {
+                            let res = res.as_ref().unwrap();
+                            assert_eq!(res.0, Acl::read_unsafe())
+                        })
+                        .and_then(|(zk, _)| zk.set_data("/acl_test", None, &b"bar"[..]))
+                        .inspect(|(_, res)| {
+                            // cannot set data on a read only node
+                            assert_eq!(res, &Err(error::SetData::NoAuth))
+                        })
+                        .and_then(|(zk, _)| zk.set_acl("/acl_test", Acl::open_unsafe(), None))
+                        .inspect(|(_, res)| {
+                            // cannot change a read only node's acl
+                            assert_eq!(res, &Err(error::SetAcl::NoAuth))
+                        })
                     }),
-            ).unwrap();
+            )
+            .unwrap();
 
         drop(zk); // make Packetizer idle
         rt.shutdown_on_idle().wait().unwrap();

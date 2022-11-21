@@ -20,7 +20,7 @@ pub trait ZooKeeperTransport: AsyncRead + AsyncWrite + Sized + Send {
     type Addr: Send;
     type ConnectError: Into<failure::Error>;
     type ConnectFut: Future<Item = Self, Error = Self::ConnectError> + Send + 'static;
-    fn connect(&Self::Addr) -> Self::ConnectFut;
+    fn connect(addr: &Self::Addr) -> Self::ConnectFut;
 }
 
 impl ZooKeeperTransport for tokio::net::TcpStream {

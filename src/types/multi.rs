@@ -1,7 +1,7 @@
 use super::Stat;
 
 /// An individual response in a `multi` request.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum MultiResponse {
     /// The response to a `create` request within a `multi` batch.
     Create(String),

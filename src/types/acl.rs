@@ -6,7 +6,7 @@ use std::string::ToString;
 /// Describes the ability of a user to perform a certain action.
 ///
 /// Permissions can be mixed together like integers with `|` and `&`.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Permission(u32);
 
 impl Permission {
@@ -145,7 +145,7 @@ mod tests {
 ///
 /// See the [ZooKeeper Programmer's Guide](https://zookeeper.apache.org/doc/current/zookeeperProgrammers.html#sc_ZooKeeperAccessControl)
 /// for more information.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Acl {
     /// The permissions associated with this ACL.
     pub perms: Permission,

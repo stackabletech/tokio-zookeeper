@@ -78,7 +78,9 @@ pub(crate) fn exists(res: Result<Response, ZkError>) -> Result<Option<Stat>, fai
     }
 }
 
-pub(crate) fn get_children(res: Result<Response, ZkError>) -> Result<Option<Vec<String>>, failure::Error> {
+pub(crate) fn get_children(
+    res: Result<Response, ZkError>,
+) -> Result<Option<Vec<String>>, failure::Error> {
     match res {
         Ok(Response::Strings(children)) => Ok(Some(children)),
         Ok(r) => bail!("got non-strings response to get-children: {:?}", r),
@@ -87,7 +89,9 @@ pub(crate) fn get_children(res: Result<Response, ZkError>) -> Result<Option<Vec<
     }
 }
 
-pub(crate) fn get_data(res: Result<Response, ZkError>) -> Result<Option<(Vec<u8>, Stat)>, failure::Error> {
+pub(crate) fn get_data(
+    res: Result<Response, ZkError>,
+) -> Result<Option<(Vec<u8>, Stat)>, failure::Error> {
     match res {
         Ok(Response::GetData { bytes, stat }) => Ok(Some((bytes, stat))),
         Ok(r) => bail!("got non-data response to get-data: {:?}", r),
@@ -154,10 +158,10 @@ pub(crate) fn multi(
 
     Ok(match req {
         RequestMarker::Create => create(res)?
-            .map(|name| MultiResponse::Create(name))
+            .map(MultiResponse::Create)
             .map_err(|err| err.into()),
         RequestMarker::SetData { version } => set_data(*version, res)?
-            .map(|stat| MultiResponse::SetData(stat))
+            .map(MultiResponse::SetData)
             .map_err(|err| err.into()),
         RequestMarker::Delete { version } => delete(*version, res)?
             .map(|_| MultiResponse::Delete)

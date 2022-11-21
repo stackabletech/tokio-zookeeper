@@ -49,7 +49,7 @@ pub struct Stat {
 
 /// CreateMode value determines how the znode is created on ZooKeeper.
 #[repr(i32)]
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CreateMode {
     /// The znode will not be automatically deleted upon client's disconnect.
     Persistent = 0,

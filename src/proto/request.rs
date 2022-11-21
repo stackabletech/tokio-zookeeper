@@ -151,21 +151,21 @@ impl WriteTo for MultiHeader {
 
 impl WriteTo for u8 {
     fn write_to<W: Write>(&self, mut writer: W) -> io::Result<()> {
-        try!(writer.write_u8(*self));
+        writer.write_u8(*self)?;
         Ok(())
     }
 }
 
 impl WriteTo for str {
     fn write_to<W: Write>(&self, mut writer: W) -> io::Result<()> {
-        try!(writer.write_i32::<BigEndian>(self.len() as i32));
+        writer.write_i32::<BigEndian>(self.len() as i32)?;
         writer.write_all(self.as_ref())
     }
 }
 
 impl WriteTo for [u8] {
     fn write_to<W: Write>(&self, mut writer: W) -> io::Result<()> {
-        try!(writer.write_i32::<BigEndian>(self.len() as i32));
+        writer.write_i32::<BigEndian>(self.len() as i32)?;
         writer.write_all(self.as_ref())
     }
 }
