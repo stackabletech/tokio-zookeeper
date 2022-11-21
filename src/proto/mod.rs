@@ -1,5 +1,6 @@
+use async_trait::async_trait;
 use std::net::SocketAddr;
-use tokio::prelude::*;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 mod active_packetizer;
 mod error;
@@ -14,18 +15,18 @@ pub(crate) use self::request::Request;
 pub(crate) use self::response::Response;
 pub(crate) use self::watch::Watch;
 
+#[async_trait]
 pub trait ZooKeeperTransport: AsyncRead + AsyncWrite + Sized + Send {
     type Addr: Send;
     type ConnectError: Into<failure::Error>;
-    type ConnectFut: Future<Item = Self, Error = Self::ConnectError> + Send + 'static;
-    fn connect(addr: &Self::Addr) -> Self::ConnectFut;
+    async fn connect(addr: &Self::Addr) -> Result<Self, Self::ConnectError>;
 }
 
+#[async_trait]
 impl ZooKeeperTransport for tokio::net::TcpStream {
     type Addr = SocketAddr;
     type ConnectError = tokio::io::Error;
-    type ConnectFut = tokio::net::tcp::ConnectFuture;
-    fn connect(addr: &Self::Addr) -> Self::ConnectFut {
-        tokio::net::TcpStream::connect(addr)
+    async fn connect(addr: &Self::Addr) -> Result<Self, Self::ConnectError> {
+        tokio::net::TcpStream::connect(addr).await
     }
 }

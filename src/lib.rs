@@ -219,12 +219,12 @@
 #![deny(missing_copy_implementations)]
 
 use failure::{bail, format_err};
-use futures::sync::oneshot;
+use futures::{channel::oneshot, Stream};
 use slog::{debug, o, trace};
 use std::borrow::Cow;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::time;
-use tokio::prelude::*;
 
 /// Per-operation ZooKeeper error types.
 pub mod error;
@@ -304,7 +304,7 @@ impl ZooKeeperBuilder {
         Item = (ZooKeeper, impl Stream<Item = WatchedEvent, Error = ()>),
         Error = failure::Error,
     > {
-        let (tx, rx) = futures::sync::mpsc::unbounded();
+        let (tx, rx) = futures::channel::mpsc::unbounded();
         let addr = *addr;
         tokio::net::TcpStream::connect(&addr)
             .map_err(failure::Error::from)
@@ -332,7 +332,7 @@ impl ZooKeeperBuilder {
         self,
         addr: SocketAddr,
         stream: tokio::net::TcpStream,
-        default_watcher: futures::sync::mpsc::UnboundedSender<WatchedEvent>,
+        default_watcher: futures::channel::mpsc::UnboundedSender<WatchedEvent>,
     ) -> impl Future<Item = ZooKeeper, Error = failure::Error> {
         let request = proto::Request::Connect {
             protocol_version: 0,
@@ -1008,113 +1008,120 @@ mod tests {
 
     #[test]
     fn example() {
-        tokio::run(
-            ZooKeeper::connect(&"127.0.0.1:2181".parse().unwrap())
-                .and_then(|(zk, default_watcher)| {
-                    // let's first check if /example exists. the .watch() causes us to be notified
-                    // the next time the "exists" status of /example changes after the call.
-                    zk.watch()
-                        .exists("/example")
-                        .inspect(|(_, stat)| {
-                            // initially, /example does not exist
-                            assert_eq!(stat, &None)
-                        })
-                        .and_then(|(zk, _)| {
-                            // so let's make it!
-                            zk.create(
-                                "/example",
-                                &b"Hello world"[..],
-                                Acl::open_unsafe(),
-                                CreateMode::Persistent,
-                            )
-                        })
-                        .inspect(|(_, ref path)| {
-                            assert_eq!(path.as_ref().map(String::as_str), Ok("/example"))
-                        })
-                        .and_then(|(zk, _)| {
-                            // does it exist now?
-                            zk.watch().exists("/example")
-                        })
-                        .inspect(|(_, stat)| {
-                            // looks like it!
-                            // note that the creation above also triggered our "exists" watch!
-                            assert_eq!(stat.unwrap().data_length as usize, b"Hello world".len())
-                        })
-                        .and_then(|(zk, _)| {
-                            // did the data get set correctly?
-                            zk.get_data("/example")
-                        })
-                        .inspect(|(_, res)| {
-                            let data = b"Hello world";
-                            let res = res.as_ref().unwrap();
-                            assert_eq!(res.0, data);
-                            assert_eq!(res.1.data_length as usize, data.len());
-                        })
-                        .and_then(|(zk, res)| {
-                            // let's update the data.
-                            zk.set_data("/example", Some(res.unwrap().1.version), &b"Bye world"[..])
-                        })
-                        .inspect(|(_, stat)| {
-                            assert_eq!(stat.unwrap().data_length as usize, "Bye world".len());
-                        })
-                        .and_then(|(zk, _)| {
-                            // create a child of /example
-                            zk.create(
-                                "/example/more",
-                                &b"Hello more"[..],
-                                Acl::open_unsafe(),
-                                CreateMode::Persistent,
-                            )
-                        })
-                        .inspect(|(_, ref path)| {
-                            assert_eq!(path.as_ref().map(String::as_str), Ok("/example/more"))
-                        })
-                        .and_then(|(zk, _)| {
-                            // it should be visible as a child of /example
-                            zk.get_children("/example")
-                        })
-                        .inspect(|(_, children)| {
-                            assert_eq!(children, &Some(vec!["more".to_string()]));
-                        })
-                        .and_then(|(zk, _)| {
-                            // it is not legal to delete a node that has children directly
-                            zk.delete("/example", None)
-                        })
-                        .inspect(|(_, res)| assert_eq!(res, &Err(error::Delete::NotEmpty)))
-                        .and_then(|(zk, _)| {
-                            // instead we must delete the children first
-                            zk.delete("/example/more", None)
-                        })
-                        .inspect(|(_, res)| assert_eq!(res, &Ok(())))
-                        .and_then(|(zk, _)| zk.delete("/example", None))
-                        .inspect(|(_, res)| assert_eq!(res, &Ok(())))
-                        .and_then(|(zk, _)| {
-                            // no /example should no longer exist!
-                            zk.exists("/example")
-                        })
-                        .inspect(|(_, stat)| assert_eq!(stat, &None))
-                        .and_then(move |(zk, _)| {
-                            // now let's check that the .watch().exists we did in the very
-                            // beginning actually triggered!
-                            default_watcher
-                                .into_future()
-                                .map(move |x| (zk, x))
-                                .map_err(|e| format_err!("stream error: {:?}", e.0))
-                        })
-                        .inspect(|(_, (event, _))| {
-                            assert_eq!(
-                                event,
-                                &Some(WatchedEvent {
-                                    event_type: WatchedEventType::NodeCreated,
-                                    keeper_state: KeeperState::SyncConnected,
-                                    path: String::from("/example"),
-                                })
-                            );
-                        })
-                })
-                .map(|_| ())
-                .map_err(|e| panic!("{:?}", e)),
-        );
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(
+                ZooKeeper::connect(&"127.0.0.1:2181".parse().unwrap())
+                    .and_then(|(zk, default_watcher)| {
+                        // let's first check if /example exists. the .watch() causes us to be notified
+                        // the next time the "exists" status of /example changes after the call.
+                        zk.watch()
+                            .exists("/example")
+                            .inspect(|(_, stat)| {
+                                // initially, /example does not exist
+                                assert_eq!(stat, &None)
+                            })
+                            .and_then(|(zk, _)| {
+                                // so let's make it!
+                                zk.create(
+                                    "/example",
+                                    &b"Hello world"[..],
+                                    Acl::open_unsafe(),
+                                    CreateMode::Persistent,
+                                )
+                            })
+                            .inspect(|(_, ref path)| {
+                                assert_eq!(path.as_ref().map(String::as_str), Ok("/example"))
+                            })
+                            .and_then(|(zk, _)| {
+                                // does it exist now?
+                                zk.watch().exists("/example")
+                            })
+                            .inspect(|(_, stat)| {
+                                // looks like it!
+                                // note that the creation above also triggered our "exists" watch!
+                                assert_eq!(stat.unwrap().data_length as usize, b"Hello world".len())
+                            })
+                            .and_then(|(zk, _)| {
+                                // did the data get set correctly?
+                                zk.get_data("/example")
+                            })
+                            .inspect(|(_, res)| {
+                                let data = b"Hello world";
+                                let res = res.as_ref().unwrap();
+                                assert_eq!(res.0, data);
+                                assert_eq!(res.1.data_length as usize, data.len());
+                            })
+                            .and_then(|(zk, res)| {
+                                // let's update the data.
+                                zk.set_data(
+                                    "/example",
+                                    Some(res.unwrap().1.version),
+                                    &b"Bye world"[..],
+                                )
+                            })
+                            .inspect(|(_, stat)| {
+                                assert_eq!(stat.unwrap().data_length as usize, "Bye world".len());
+                            })
+                            .and_then(|(zk, _)| {
+                                // create a child of /example
+                                zk.create(
+                                    "/example/more",
+                                    &b"Hello more"[..],
+                                    Acl::open_unsafe(),
+                                    CreateMode::Persistent,
+                                )
+                            })
+                            .inspect(|(_, ref path)| {
+                                assert_eq!(path.as_ref().map(String::as_str), Ok("/example/more"))
+                            })
+                            .and_then(|(zk, _)| {
+                                // it should be visible as a child of /example
+                                zk.get_children("/example")
+                            })
+                            .inspect(|(_, children)| {
+                                assert_eq!(children, &Some(vec!["more".to_string()]));
+                            })
+                            .and_then(|(zk, _)| {
+                                // it is not legal to delete a node that has children directly
+                                zk.delete("/example", None)
+                            })
+                            .inspect(|(_, res)| assert_eq!(res, &Err(error::Delete::NotEmpty)))
+                            .and_then(|(zk, _)| {
+                                // instead we must delete the children first
+                                zk.delete("/example/more", None)
+                            })
+                            .inspect(|(_, res)| assert_eq!(res, &Ok(())))
+                            .and_then(|(zk, _)| zk.delete("/example", None))
+                            .inspect(|(_, res)| assert_eq!(res, &Ok(())))
+                            .and_then(|(zk, _)| {
+                                // no /example should no longer exist!
+                                zk.exists("/example")
+                            })
+                            .inspect(|(_, stat)| assert_eq!(stat, &None))
+                            .and_then(move |(zk, _)| {
+                                // now let's check that the .watch().exists we did in the very
+                                // beginning actually triggered!
+                                default_watcher
+                                    .into_future()
+                                    .map(move |x| (zk, x))
+                                    .map_err(|e| format_err!("stream error: {:?}", e.0))
+                            })
+                            .inspect(|(_, (event, _))| {
+                                assert_eq!(
+                                    event,
+                                    &Some(WatchedEvent {
+                                        event_type: WatchedEventType::NodeCreated,
+                                        keeper_state: KeeperState::SyncConnected,
+                                        path: String::from("/example"),
+                                    })
+                                );
+                            })
+                    })
+                    .map(|_| ())
+                    .map_err(|e| panic!("{:?}", e)),
+            );
     }
 
     #[test]

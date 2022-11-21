@@ -1,5 +1,5 @@
-use futures::sync::oneshot;
 use crate::WatchedEvent;
+use futures::channel::oneshot;
 
 #[derive(Debug)]
 pub(crate) enum Watch {

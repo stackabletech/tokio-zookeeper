@@ -6,13 +6,16 @@ use crate::{Watch, WatchedEvent, ZkError};
 use byteorder::{BigEndian, WriteBytesExt};
 use failure::format_err;
 use futures::{
+    channel::{mpsc, oneshot},
     future::Either,
-    sync::{mpsc, oneshot},
-    try_ready,
 };
 use slog::{debug, error, info, trace};
-use std::mem;
-use tokio::prelude::*;
+use std::{
+    future::Future,
+    mem,
+    task::{ready, Poll},
+};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 pub(crate) struct Packetizer<S>
 where
@@ -77,7 +80,7 @@ where
 enum PacketizerState<S> {
     Connected(ActivePacketizer<S>),
     Reconnecting(
-        Box<dyn Future<Item = ActivePacketizer<S>, Error = failure::Error> + Send + 'static>,
+        Box<dyn Future<Output = Result<ActivePacketizer<S>, failure::Error>> + Send + 'static>,
     ),
 }
 
@@ -90,12 +93,12 @@ where
         exiting: bool,
         logger: &mut slog::Logger,
         default_watcher: &mut mpsc::UnboundedSender<WatchedEvent>,
-    ) -> Result<Async<()>, failure::Error> {
+    ) -> Poll<Result<(), failure::Error>> {
         let ap = match *self {
             PacketizerState::Connected(ref mut ap) => {
                 return ap.poll(exiting, logger, default_watcher)
             }
-            PacketizerState::Reconnecting(ref mut c) => try_ready!(c.poll()),
+            PacketizerState::Reconnecting(ref mut c) => ready!(c.poll()?),
         };
 
         // we are now connected!
@@ -108,9 +111,9 @@ impl<S> Packetizer<S>
 where
     S: ZooKeeperTransport,
 {
-    fn poll_enqueue(&mut self) -> Result<Async<()>, ()> {
+    fn poll_enqueue(&mut self) -> Poll<Result<(), ()>> {
         while let PacketizerState::Connected(ref mut ap) = self.state {
-            let (mut item, tx) = match try_ready!(self.rx.poll()) {
+            let (mut item, tx) = match ready!(self.rx.poll()?) {
                 Some((request, response)) => (request, response),
                 None => return Err(()),
             };
@@ -162,7 +165,7 @@ where
             ap.enqueue(self.xid, item, tx);
             self.xid += 1;
         }
-        Ok(Async::NotReady)
+        Ok(Poll::Pending)
     }
 }
 
@@ -170,10 +173,9 @@ impl<S> Future for Packetizer<S>
 where
     S: ZooKeeperTransport,
 {
-    type Item = ();
-    type Error = failure::Error;
+    type Output = Result<(), failure::Error>;
 
-    fn poll(&mut self) -> Result<Async<Self::Item>, Self::Error> {
+    fn poll(&mut self) -> Poll<Self::Output> {
         trace!(self.logger, "packetizer polled");
         if !self.exiting {
             trace!(self.logger, "poll_enqueue");

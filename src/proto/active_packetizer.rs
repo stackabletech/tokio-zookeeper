@@ -2,18 +2,18 @@ use super::{request, watch::WatchType, Request, Response};
 use crate::{WatchedEvent, WatchedEventType, ZkError};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use failure::bail;
-use futures::sync::{mpsc, oneshot};
-use futures::try_ready;
+use futures::channel::{mpsc, oneshot};
 use slog::{debug, info, trace};
 use std::collections::HashMap;
-use std::{mem, time};
-use tokio::prelude::*;
+use std::task::ready;
+use std::{mem, task::Poll, time};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 pub(super) struct ActivePacketizer<S> {
     stream: S,
 
     /// Heartbeat timer,
-    timer: tokio::timer::Delay,
+    timer: tokio::time::Sleep,
     timeout: time::Duration,
 
     /// Bytes we have not yet set.
@@ -52,9 +52,7 @@ where
     pub(super) fn new(stream: S) -> Self {
         ActivePacketizer {
             stream,
-            timer: tokio::timer::Delay::new(
-                time::Instant::now() + time::Duration::from_secs(86_400),
-            ),
+            timer: tokio::time::sleep(time::Duration::from_secs(86_400)),
             timeout: time::Duration::new(86_400, 0),
             outbox: Vec::new(),
             outstart: 0,
@@ -122,13 +120,13 @@ where
         &mut self,
         exiting: bool,
         logger: &mut slog::Logger,
-    ) -> Result<Async<()>, failure::Error>
+    ) -> Poll<Result<(), failure::Error>>
     where
         S: AsyncWrite,
     {
         let mut wrote = false;
         while self.outlen() != 0 {
-            let n = try_ready!(self.stream.poll_write(&self.outbox[self.outstart..]));
+            let n = ready!(self.stream.poll_write(&self.outbox[self.outstart..])?);
             wrote = true;
             self.outstart += n;
             if self.outstart == self.outbox.len() {
@@ -147,17 +145,17 @@ where
 
         if exiting {
             debug!(logger, "shutting down writer");
-            try_ready!(self.stream.shutdown());
+            ready!(self.stream.shutdown()?);
         }
 
-        Ok(Async::Ready(()))
+        Ok(Poll::Ready(()))
     }
 
     fn poll_read(
         &mut self,
         default_watcher: &mut mpsc::UnboundedSender<WatchedEvent>,
         logger: &mut slog::Logger,
-    ) -> Result<Async<()>, failure::Error>
+    ) -> Poll<Result<(), failure::Error>>
     where
         S: AsyncRead,
     {
@@ -174,7 +172,7 @@ where
                 let read_from = self.inbox.len();
                 self.inbox.resize(self.instart + need, 0);
                 match self.stream.poll_read(&mut self.inbox[read_from..])? {
-                    Async::Ready(n) => {
+                    Poll::Ready(n) => {
                         self.inbox.truncate(read_from + n);
                         if n == 0 {
                             if self.inlen() != 0 {
@@ -186,7 +184,7 @@ where
                             } else {
                                 // Server closed session with no bytes left in buffer
                                 debug!(logger, "server closed connection");
-                                return Ok(Async::Ready(()));
+                                return Ok(Poll::Ready(()));
                             }
                         }
 
@@ -197,9 +195,9 @@ where
                             need += length;
                         }
                     }
-                    Async::NotReady => {
+                    Poll::Pending => {
                         self.inbox.truncate(read_from);
-                        return Ok(Async::NotReady);
+                        return Ok(Poll::Pending);
                     }
                 }
             }
@@ -369,11 +367,11 @@ where
         exiting: bool,
         logger: &mut slog::Logger,
         default_watcher: &mut mpsc::UnboundedSender<WatchedEvent>,
-    ) -> Result<Async<()>, failure::Error> {
+    ) -> Poll<Result<(), failure::Error>> {
         trace!(logger, "poll_read");
         let r = self.poll_read(default_watcher, logger)?;
 
-        if let Async::Ready(()) = self.timer.poll()? {
+        if let Poll::Ready(()) = self.timer.poll()? {
             if self.outbox.is_empty() {
                 // send a ping!
                 // length is known for pings
@@ -400,15 +398,15 @@ where
         let w = self.poll_write(exiting, logger)?;
 
         match (r, w) {
-            (Async::Ready(()), Async::Ready(())) if exiting => {
+            (Poll::Ready(()), Poll::Ready(())) if exiting => {
                 debug!(logger, "packetizer done");
-                Ok(Async::Ready(()))
+                Ok(Poll::Ready(()))
             }
-            (Async::Ready(()), Async::Ready(())) => {
+            (Poll::Ready(()), Poll::Ready(())) => {
                 bail!("Not exiting, but server closed connection")
             }
-            (Async::Ready(()), _) => bail!("outstanding requests, but response channel closed"),
-            _ => Ok(Async::NotReady),
+            (Poll::Ready(()), _) => bail!("outstanding requests, but response channel closed"),
+            _ => Ok(Poll::Pending),
         }
     }
 }
