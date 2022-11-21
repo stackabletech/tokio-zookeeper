@@ -3,6 +3,7 @@ use crate::{WatchedEvent, WatchedEventType, ZkError};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use failure::format_err;
 use futures::channel::{mpsc, oneshot};
+use pin_project::pin_project;
 use slog::{debug, info, trace};
 use std::collections::HashMap;
 use std::{
@@ -14,11 +15,14 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+#[pin_project]
 pub(super) struct ActivePacketizer<S> {
-    stream: Pin<Box<S>>,
+    #[pin]
+    stream: S,
 
     /// Heartbeat timer,
-    timer: Pin<Box<tokio::time::Sleep>>,
+    #[pin]
+    timer: tokio::time::Sleep,
     timeout: time::Duration,
 
     /// Bytes we have not yet set.
@@ -56,8 +60,8 @@ where
 {
     pub(super) fn new(stream: S) -> Self {
         ActivePacketizer {
-            stream: Box::pin(stream),
-            timer: Box::pin(tokio::time::sleep(time::Duration::from_secs(86_400))),
+            stream,
+            timer: tokio::time::sleep(time::Duration::from_secs(86_400)),
             timeout: time::Duration::new(86_400, 0),
             outbox: Vec::new(),
             outstart: 0,
@@ -74,6 +78,18 @@ where
         }
     }
 
+    pub(super) fn outbox(self: Pin<&mut Self>) -> &mut Vec<u8> {
+        self.project().outbox
+    }
+    pub(super) fn take_password(self: Pin<&mut Self>) -> Vec<u8> {
+        self.project().password.split_off(0)
+    }
+    pub(super) fn pending_watchers(
+        self: Pin<&mut Self>,
+    ) -> &mut HashMap<i32, (String, oneshot::Sender<WatchedEvent>, WatchType)> {
+        self.project().pending_watchers
+    }
+
     fn outlen(&self) -> usize {
         self.outbox.len() - self.outstart
     }
@@ -82,47 +98,65 @@ where
         self.inbox.len() - self.instart
     }
 
-    pub(super) fn enqueue(
-        &mut self,
+    fn enqueue_impl(
+        outbox: &mut Vec<u8>,
+        reply: &mut HashMap<i32, (request::OpCode, oneshot::Sender<Result<Response, ZkError>>)>,
         xid: i32,
         item: Request,
         tx: oneshot::Sender<Result<Response, ZkError>>,
     ) {
-        let lengthi = self.outbox.len();
+        let lengthi = outbox.len();
         // dummy length
-        self.outbox.push(0);
-        self.outbox.push(0);
-        self.outbox.push(0);
-        self.outbox.push(0);
+        outbox.push(0);
+        outbox.push(0);
+        outbox.push(0);
+        outbox.push(0);
 
-        let old = self.reply.insert(xid, (item.opcode(), tx));
+        let old = reply.insert(xid, (item.opcode(), tx));
         assert!(old.is_none());
 
         if let Request::Connect { .. } = item {
         } else {
             // xid
-            self.outbox
+            outbox
                 .write_i32::<BigEndian>(xid)
                 .expect("Vec::write should never fail");
             // opcode
-            self.outbox
+            outbox
                 .write_i32::<BigEndian>(item.opcode() as i32)
                 .expect("Vec::write should never fail");
         }
 
         // type and payload
-        item.serialize_into(&mut self.outbox)
+        item.serialize_into(outbox)
             .expect("Vec::write should never fail");
         // set true length
-        let written = self.outbox.len() - lengthi - 4;
-        let mut length = &mut self.outbox[lengthi..lengthi + 4];
+        let written = outbox.len() - lengthi - 4;
+        let mut length = &mut outbox[lengthi..lengthi + 4];
         length
             .write_i32::<BigEndian>(written as i32)
             .expect("Vec::write should never fail");
     }
+    pub(super) fn enqueue(
+        self: Pin<&mut Self>,
+        xid: i32,
+        item: Request,
+        tx: oneshot::Sender<Result<Response, ZkError>>,
+    ) {
+        let this = self.project();
+        Self::enqueue_impl(this.outbox, this.reply, xid, item, tx)
+    }
+    pub(super) fn enqueue_unpin(
+        &mut self,
+        xid: i32,
+        item: Request,
+        tx: oneshot::Sender<Result<Response, ZkError>>,
+    ) {
+        Self::enqueue_impl(&mut self.outbox, &mut self.reply, xid, item, tx)
+    }
 
     fn poll_write(
-        &mut self,
+        mut self: Pin<&mut Self>,
         cx: &mut Context,
         exiting: bool,
         logger: &mut slog::Logger,
@@ -132,27 +166,28 @@ where
     {
         let mut wrote = false;
         while self.outlen() != 0 {
-            let n = ready!(self
+            let mut this = self.as_mut().project();
+            let n = ready!(this
                 .stream
                 .as_mut()
-                .poll_write(cx, &self.outbox[self.outstart..])?);
+                .poll_write(cx, &this.outbox[*this.outstart..])?);
             wrote = true;
-            self.outstart += n;
-            if self.outstart == self.outbox.len() {
-                self.outbox.clear();
-                self.outstart = 0;
+            *this.outstart += n;
+            if *this.outstart == this.outbox.len() {
+                this.outbox.clear();
+                *this.outstart = 0;
             }
         }
 
+        let mut this = self.project();
         if wrote {
             // heartbeat is since last write traffic!
             trace!(logger, "resetting heartbeat timer");
-            self.timer
-                .as_mut()
-                .reset(tokio::time::Instant::now() + self.timeout);
+            this.timer
+                .reset(tokio::time::Instant::now() + *this.timeout);
         }
 
-        ready!(self
+        ready!(this
             .stream
             .as_mut()
             .poll_flush(cx)
@@ -160,14 +195,14 @@ where
 
         if exiting {
             debug!(logger, "shutting down writer");
-            ready!(self.stream.as_mut().poll_shutdown(cx)?);
+            ready!(this.stream.poll_shutdown(cx)?);
         }
 
         Poll::Ready(Ok(()))
     }
 
     fn poll_read(
-        &mut self,
+        mut self: Pin<&mut Self>,
         cx: &mut Context,
         default_watcher: &mut mpsc::UnboundedSender<WatchedEvent>,
         logger: &mut slog::Logger,
@@ -185,13 +220,14 @@ where
             trace!(logger, "need {} bytes, have {}", need, self.inlen());
 
             while self.inlen() < need {
-                let read_from = self.inbox.len();
-                self.inbox.resize(self.instart + need, 0);
-                let mut inbox_buf = ReadBuf::new(&mut self.inbox[read_from..]);
-                match self.stream.as_mut().poll_read(cx, &mut inbox_buf)? {
+                let this = self.as_mut().project();
+                let read_from = this.inbox.len();
+                this.inbox.resize(*this.instart + need, 0);
+                let mut inbox_buf = ReadBuf::new(&mut this.inbox[read_from..]);
+                match this.stream.poll_read(cx, &mut inbox_buf)? {
                     Poll::Ready(()) => {
                         let n = inbox_buf.filled().len();
-                        self.inbox.truncate(read_from + n);
+                        this.inbox.truncate(read_from + n);
                         if n == 0 {
                             if self.inlen() != 0 {
                                 return Poll::Ready(Err(format_err!(
@@ -214,18 +250,19 @@ where
                         }
                     }
                     Poll::Pending => {
-                        self.inbox.truncate(read_from);
+                        this.inbox.truncate(read_from);
                         return Poll::Pending;
                     }
                 }
             }
 
             {
+                let mut this = self.as_mut().project();
                 let mut err = None;
-                let mut buf = &self.inbox[self.instart + 4..self.instart + need];
-                self.instart += need;
+                let mut buf = &this.inbox[*this.instart + 4..*this.instart + need];
+                *this.instart += need;
 
-                let xid = if self.first {
+                let xid = if *this.first {
                     0
                 } else {
                     let xid = buf.read_i32::<BigEndian>()?;
@@ -234,12 +271,12 @@ where
                         trace!(
                             logger,
                             "updated zxid from {} to {}",
-                            self.last_zxid_seen,
+                            *this.last_zxid_seen,
                             zxid
                         );
 
-                        assert!(zxid >= self.last_zxid_seen);
-                        self.last_zxid_seen = zxid;
+                        assert!(zxid >= *this.last_zxid_seen);
+                        *this.last_zxid_seen = zxid;
                     }
                     let zk_err: ZkError = buf.read_i32::<BigEndian>()?.into();
                     if zk_err != ZkError::Ok {
@@ -248,7 +285,7 @@ where
                     xid
                 };
 
-                if xid == 0 && !self.first {
+                if xid == 0 && !*this.first {
                     // response to shutdown -- empty response
                     // XXX: in theory, server should now shut down receive end
                     trace!(logger, "got response to CloseSession");
@@ -262,7 +299,7 @@ where
                     trace!(logger, "got watcher event {:?}", e);
 
                     let mut remove = false;
-                    if let Some(watchers) = self.watchers.get_mut(&e.path) {
+                    if let Some(watchers) = this.watchers.get_mut(&e.path) {
                         // custom watchers were set by the user -- notify them
                         let mut i = (watchers.len() - 1) as isize;
                         trace!(logger,
@@ -297,7 +334,7 @@ where
                     }
 
                     if remove {
-                        self.watchers
+                        this.watchers
                             .remove(&e.path)
                             .expect("tried to remove watcher that didn't exist");
                     }
@@ -312,19 +349,19 @@ where
                     }
                 } else {
                     // response to user request
-                    self.first = false;
+                    *this.first = false;
 
                     // find the waiting request future
-                    let (opcode, tx) = self.reply.remove(&xid).unwrap(); // TODO: return an error if xid was unknown
+                    let (opcode, tx) = this.reply.remove(&xid).unwrap(); // TODO: return an error if xid was unknown
 
-                    if let Some(w) = self.pending_watchers.remove(&xid) {
+                    if let Some(w) = this.pending_watchers.remove(&xid) {
                         // normally, watches are *only* added for successful operations
                         // the exception to this is if an exists call fails with NoNode
                         if err.is_none()
                             || (opcode == request::OpCode::Exists && err == Some(ZkError::NoNode))
                         {
                             trace!(logger, "pending watcher turned into real watcher"; "xid" => xid);
-                            self.watchers
+                            this.watchers
                                 .entry(w.0)
                                 .or_insert_with(Vec::new)
                                 .push((w.1, w.2));
@@ -360,14 +397,14 @@ where
                             assert!(timeout >= 0);
                             trace!(logger, "negotiated session timeout: {}ms", timeout);
 
-                            self.timeout = time::Duration::from_millis(2 * timeout as u64 / 3);
-                            self.timer
+                            *this.timeout = time::Duration::from_millis(2 * timeout as u64 / 3);
+                            this.timer
                                 .as_mut()
-                                .reset(tokio::time::Instant::now() + self.timeout);
+                                .reset(tokio::time::Instant::now() + *this.timeout);
 
                             // keep track of these for consistent re-connect
-                            self.session_id = session_id;
-                            mem::swap(&mut self.password, password);
+                            *this.session_id = session_id;
+                            mem::swap(this.password, password);
                         }
 
                         let _ = tx.send(Ok(r)); // if receiver doesn't care, we don't either
@@ -376,35 +413,37 @@ where
             }
 
             if self.instart == self.inbox.len() {
-                self.inbox.clear();
-                self.instart = 0;
+                let this = self.as_mut().project();
+                this.inbox.clear();
+                *this.instart = 0;
             }
         }
     }
 
     pub(super) fn poll(
-        &mut self,
+        mut self: Pin<&mut Self>,
         cx: &mut Context,
         exiting: bool,
         logger: &mut slog::Logger,
         default_watcher: &mut mpsc::UnboundedSender<WatchedEvent>,
     ) -> Poll<Result<(), failure::Error>> {
         trace!(logger, "poll_read");
-        let r = self.poll_read(cx, default_watcher, logger)?;
+        let r = self.as_mut().poll_read(cx, default_watcher, logger)?;
 
-        if let Poll::Ready(()) = self.timer.as_mut().poll(cx) {
-            if self.outbox.is_empty() {
+        let mut this = self.as_mut().project();
+        if let Poll::Ready(()) = this.timer.as_mut().poll(cx) {
+            if this.outbox.is_empty() {
                 // send a ping!
                 // length is known for pings
-                self.outbox
+                this.outbox
                     .write_i32::<BigEndian>(8)
                     .expect("Vec::write should never fail");
                 // xid
-                self.outbox
+                this.outbox
                     .write_i32::<BigEndian>(-2)
                     .expect("Vec::write should never fail");
                 // opcode
-                self.outbox
+                this.outbox
                     .write_i32::<BigEndian>(request::OpCode::Ping as i32)
                     .expect("Vec::write should never fail");
                 trace!(logger, "sending heartbeat");
@@ -412,9 +451,9 @@ where
                 // already request in flight, so no need to also send heartbeat
             }
 
-            self.timer
+            this.timer
                 .as_mut()
-                .reset(tokio::time::Instant::now() + self.timeout);
+                .reset(tokio::time::Instant::now() + *this.timeout);
         }
 
         trace!(logger, "poll_read");

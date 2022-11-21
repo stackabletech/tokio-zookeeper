@@ -29,6 +29,7 @@ where
     addr: S::Addr,
 
     /// Current state
+    #[pin]
     state: PacketizerState<S>,
 
     /// Watcher to send watch events to.
@@ -81,8 +82,9 @@ where
     }
 }
 
+#[pin_project(project = PacketizerStateProj)]
 enum PacketizerState<S> {
-    Connected(ActivePacketizer<S>),
+    Connected(#[pin] ActivePacketizer<S>),
     Reconnecting(
         Pin<Box<dyn Future<Output = Result<ActivePacketizer<S>, failure::Error>> + Send + 'static>>,
     ),
@@ -93,21 +95,21 @@ where
     S: AsyncRead + AsyncWrite,
 {
     fn poll(
-        &mut self,
+        mut self: Pin<&mut Self>,
         cx: &mut Context,
         exiting: bool,
         logger: &mut slog::Logger,
         default_watcher: &mut mpsc::UnboundedSender<WatchedEvent>,
     ) -> Poll<Result<(), failure::Error>> {
-        let ap = match *self {
-            PacketizerState::Connected(ref mut ap) => {
-                return ap.poll(cx, exiting, logger, default_watcher)
+        let ap = match self.as_mut().project() {
+            PacketizerStateProj::Connected(ref mut ap) => {
+                return ap.as_mut().poll(cx, exiting, logger, default_watcher)
             }
-            PacketizerState::Reconnecting(ref mut c) => ready!(c.as_mut().poll(cx)?),
+            PacketizerStateProj::Reconnecting(ref mut c) => ready!(c.as_mut().poll(cx)?),
         };
 
         // we are now connected!
-        *self = PacketizerState::Connected(ap);
+        self.set(PacketizerState::Connected(ap));
         self.poll(cx, exiting, logger, default_watcher)
     }
 }
@@ -116,13 +118,14 @@ impl<S> Packetizer<S>
 where
     S: ZooKeeperTransport,
 {
-    fn poll_enqueue(&mut self, cx: &mut Context) -> Poll<Result<(), ()>> {
-        while let PacketizerState::Connected(ref mut ap) = self.state {
-            let (mut item, tx) = match ready!(self.rx.poll_next_unpin(cx)) {
+    fn poll_enqueue(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), ()>> {
+        let mut this = self.project();
+        while let PacketizerStateProj::Connected(ref mut ap) = this.state.as_mut().project() {
+            let (mut item, tx) = match ready!(this.rx.poll_next_unpin(cx)) {
                 Some((request, response)) => (request, response),
                 None => return Poll::Ready(Err(())),
             };
-            debug!(self.logger, "enqueueing request {:?}", item; "xid" => self.xid);
+            debug!(this.logger, "enqueueing request {:?}", item; "xid" => *this.xid);
 
             match item {
                 Request::GetData {
@@ -151,14 +154,15 @@ where
                                 _ => unreachable!(),
                             };
                             trace!(
-                                self.logger,
+                                this.logger,
                                 "adding pending watcher";
-                                "xid" => self.xid,
+                                "xid" => *this.xid,
                                 "path" => path,
                                 "wtype" => ?wtype
                             );
-                            ap.pending_watchers
-                                .insert(self.xid, (path.to_string(), w, wtype));
+                            ap.as_mut()
+                                .pending_watchers()
+                                .insert(*this.xid, (path.to_string(), w, wtype));
                         } else {
                             unreachable!();
                         }
@@ -167,8 +171,8 @@ where
                 _ => {}
             }
 
-            ap.enqueue(self.xid, item, tx);
-            self.xid += 1;
+            ap.as_mut().enqueue(*this.xid, item, tx);
+            *this.xid += 1;
         }
         Poll::Pending
     }
@@ -191,18 +195,21 @@ where
                     // no more requests will be enqueued
                     *this.exiting = true;
 
-                    if let PacketizerState::Connected(ref mut ap) = this.state {
+                    if let PacketizerStateProj::Connected(ref mut ap) = this.state.project() {
                         // send CloseSession
                         // length is fixed
-                        ap.outbox
+                        ap.as_mut()
+                            .outbox()
                             .write_i32::<BigEndian>(8)
                             .expect("Vec::write should never fail");
                         // xid
-                        ap.outbox
+                        ap.as_mut()
+                            .outbox()
                             .write_i32::<BigEndian>(0)
                             .expect("Vec::write should never fail");
                         // opcode
-                        ap.outbox
+                        ap.as_mut()
+                            .outbox()
                             .write_i32::<BigEndian>(request::OpCode::CloseSession as i32)
                             .expect("Vec::write should never fail");
                     } else {
@@ -212,9 +219,10 @@ where
             }
         }
 
-        let this = self.as_mut().project();
+        let mut this = self.as_mut().project();
         match this
             .state
+            .as_mut()
             .poll(cx, *this.exiting, this.logger, this.default_watcher)
         {
             Poll::Ready(Ok(v)) => Poll::Ready(Ok(v)),
@@ -224,16 +232,13 @@ where
                 // for now, assume all errors are disconnects
                 // TODO: test this!
 
-                let password = if let PacketizerState::Connected(ActivePacketizer {
-                    ref mut password,
-                    ..
-                }) = this.state
-                {
-                    password.split_off(0)
-                } else {
-                    // XXX: error while connecting -- don't recurse (for now)
-                    return Poll::Ready(Err(e));
-                };
+                let password =
+                    if let PacketizerStateProj::Connected(ap) = this.state.as_mut().project() {
+                        ap.take_password()
+                    } else {
+                        // XXX: error while connecting -- don't recurse (for now)
+                        return Poll::Ready(Err(e));
+                    };
 
                 if let PacketizerState::Connected(ActivePacketizer {
                     last_zxid_seen,
@@ -270,12 +275,13 @@ where
                                 }));
 
                                 let mut ap = ActivePacketizer::new(stream);
-                                ap.enqueue(xid, request, tx);
+                                ap.enqueue_unpin(xid, request, tx);
                                 ap
                             });
 
                     // dropping the old state will also cancel in-flight requests
-                    *this.state = PacketizerState::Reconnecting(Box::pin(retry));
+                    this.state
+                        .set(PacketizerState::Reconnecting(Box::pin(retry)));
                     self.poll(cx)
                 } else {
                     unreachable!();
