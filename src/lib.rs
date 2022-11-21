@@ -111,11 +111,11 @@
 //!
 //! // let's first check if /example exists. the .watch() causes us to be notified
 //! // the next time the "exists" status of /example changes after the call.
-//! let (zk, stat) = zk.watch().exists("/example").await.unwrap();
+//! let stat = zk.watch().exists("/example").await.unwrap();
 //! // initially, /example does not exist
 //! assert_eq!(stat, None);
 //! // so let's make it!
-//! let (zk, path) = zk
+//! let path = zk
 //!     .create(
 //!         "/example",
 //!         &b"Hello world"[..],
@@ -127,27 +127,27 @@
 //! assert_eq!(path.as_deref(), Ok("/example"));
 //!
 //! // does it exist now?
-//! let (zk, stat) = zk.watch().exists("/example").await.unwrap();
+//! let stat = zk.watch().exists("/example").await.unwrap();
 //! // looks like it!
 //! // note that the creation above also triggered our "exists" watch!
 //! assert_eq!(stat.unwrap().data_length as usize, b"Hello world".len());
 //!
 //! // did the data get set correctly?
-//! let (zk, res) = zk.get_data("/example").await.unwrap();
+//! let res = zk.get_data("/example").await.unwrap();
 //! let data = b"Hello world";
 //! let res = res.unwrap();
 //! assert_eq!(res.0, data);
 //! assert_eq!(res.1.data_length as usize, data.len());
 //!
 //! // let's update the data.
-//! let (zk, stat) = zk
+//! let stat = zk
 //!     .set_data("/example", Some(res.1.version), &b"Bye world"[..])
 //!     .await
 //!     .unwrap();
 //! assert_eq!(stat.unwrap().data_length as usize, "Bye world".len());
 //!
 //! // create a child of /example
-//! let (zk, path) = zk
+//! let path = zk
 //!     .create(
 //!         "/example/more",
 //!         &b"Hello more"[..],
@@ -159,24 +159,20 @@
 //! assert_eq!(path.as_deref(), Ok("/example/more"));
 //!
 //! // it should be visible as a child of /example
-//! let (zk, children) = zk.get_children("/example").await.unwrap();
+//! let children = zk.get_children("/example").await.unwrap();
 //! assert_eq!(children, Some(vec!["more".to_string()]));
 //!
 //! // it is not legal to delete a node that has children directly
-//! let (zk, res) = zk.delete("/example", None).await.unwrap();
+//! let res = zk.delete("/example", None).await.unwrap();
 //! assert_eq!(res, Err(error::Delete::NotEmpty));
 //! // instead we must delete the children first
-//! zk.delete("/example/more", None)
-//!     .inspect_ok(|(_, res)| assert_eq!(res, &Ok(())))
-//!     .and_then(|(zk, _)| zk.delete("/example", None))
-//!     .inspect_ok(|(_, res)| assert_eq!(res, &Ok(())))
-//!     .and_then(|(zk, _)| {
-//!         // no /example should no longer exist!
-//!         zk.exists("/example")
-//!     })
-//!     .inspect_ok(|(_, stat)| assert_eq!(stat, &None))
-//!     .await
-//!     .unwrap();
+//! let res = zk.delete("/example/more", None).await.unwrap();
+//! assert_eq!(res, Ok(()));
+//! let res = zk.delete("/example", None).await.unwrap();
+//! assert_eq!(res, Ok(()));
+//! // no /example should no longer exist!
+//! let stat = zk.exists("/example").await.unwrap();
+//! assert_eq!(stat, None);
 //!
 //! // now let's check that the .watch().exists we did in the very
 //! // beginning actually triggered!
@@ -372,12 +368,12 @@ impl ZooKeeper {
     ///
     /// The maximum allowable size of the data array is 1 MB (1,048,576 bytes).
     pub async fn create<D, A>(
-        self,
+        &self,
         path: &str,
         data: D,
         acl: A,
         mode: CreateMode,
-    ) -> Result<(Self, Result<String, error::Create>), failure::Error>
+    ) -> Result<Result<String, error::Create>, failure::Error>
     where
         D: Into<Cow<'static, [u8]>>,
         A: Into<Cow<'static, [Acl]>>,
@@ -393,7 +389,6 @@ impl ZooKeeper {
             })
             .await
             .and_then(transform::create)
-            .map(move |r| (self, r))
     }
 
     /// Set the data for the node at the given `path`.
@@ -407,11 +402,11 @@ impl ZooKeeper {
     ///
     /// The maximum allowable size of the data array is 1 MB (1,048,576 bytes).
     pub async fn set_data<D>(
-        self,
+        &self,
         path: &str,
         version: Option<i32>,
         data: D,
-    ) -> Result<(Self, Result<Stat, error::SetData>), failure::Error>
+    ) -> Result<Result<Stat, error::SetData>, failure::Error>
     where
         D: Into<Cow<'static, [u8]>>,
     {
@@ -426,7 +421,6 @@ impl ZooKeeper {
             })
             .await
             .and_then(move |r| transform::set_data(version, r))
-            .map(move |r| (self, r))
     }
 
     /// Delete the node at the given `path`.
@@ -438,10 +432,10 @@ impl ZooKeeper {
     /// left by `exists` API calls, and the watches on the parent node left by `get_children` API
     /// calls.
     pub async fn delete(
-        self,
+        &self,
         path: &str,
         version: Option<i32>,
-    ) -> Result<(Self, Result<(), error::Delete>), failure::Error> {
+    ) -> Result<Result<(), error::Delete>, failure::Error> {
         trace!(self.logger, "delete"; "path" => path, "version" => ?version);
         let version = version.unwrap_or(-1);
         self.connection
@@ -451,7 +445,6 @@ impl ZooKeeper {
             })
             .await
             .and_then(move |r| transform::delete(version, r))
-            .map(move |r| (self, r))
     }
 
     /// Return the [ACL](https://zookeeper.apache.org/doc/current/zookeeperProgrammers.html#sc_ZooKeeperAccessControl)
@@ -460,9 +453,9 @@ impl ZooKeeper {
     /// If no node exists for the given path, the returned future resolves with an error of
     /// [`error::GetAcl::NoNode`].
     pub async fn get_acl(
-        self,
+        &self,
         path: &str,
-    ) -> Result<(Self, Result<(Vec<Acl>, Stat), error::GetAcl>), failure::Error> {
+    ) -> Result<Result<(Vec<Acl>, Stat), error::GetAcl>, failure::Error> {
         trace!(self.logger, "get_acl"; "path" => path);
         self.connection
             .enqueue(proto::Request::GetAcl {
@@ -470,7 +463,6 @@ impl ZooKeeper {
             })
             .await
             .and_then(transform::get_acl)
-            .map(move |r| (self, r))
     }
 
     /// Set the [ACL](https://zookeeper.apache.org/doc/current/zookeeperProgrammers.html#sc_ZooKeeperAccessControl)
@@ -483,11 +475,11 @@ impl ZooKeeper {
     /// [`error::SetAcl::NoNode`]. If the given `version` does not match the ACL version, the
     /// returned future resolves with an error of [`error::SetAcl::BadVersion`].
     pub async fn set_acl<A>(
-        self,
+        &self,
         path: &str,
         acl: A,
         version: Option<i32>,
-    ) -> Result<(Self, Result<Stat, error::SetAcl>), failure::Error>
+    ) -> Result<Result<Stat, error::SetAcl>, failure::Error>
     where
         A: Into<Cow<'static, [Acl]>>,
     {
@@ -501,27 +493,22 @@ impl ZooKeeper {
             })
             .await
             .and_then(move |r| transform::set_acl(version, r))
-            .map(move |r| (self, r))
     }
 }
 
 impl ZooKeeper {
     /// Add a global watch for the next chained operation.
-    pub fn watch(self) -> WatchGlobally {
-        WatchGlobally(self)
+    pub fn watch(&self) -> WatchGlobally {
+        WatchGlobally(&self)
     }
 
     /// Add a watch for the next chained operation, and return a future for any received event
     /// along with the operation's (successful) result.
-    pub fn with_watcher(self) -> WithWatcher {
-        WithWatcher(self)
+    pub fn with_watcher(&self) -> WithWatcher {
+        WithWatcher(&self)
     }
 
-    async fn exists_w(
-        self,
-        path: &str,
-        watch: Watch,
-    ) -> Result<(Self, Option<Stat>), failure::Error> {
+    async fn exists_w(&self, path: &str, watch: Watch) -> Result<Option<Stat>, failure::Error> {
         trace!(self.logger, "exists"; "path" => path, "watch" => ?watch);
         self.connection
             .enqueue(proto::Request::Exists {
@@ -530,19 +517,18 @@ impl ZooKeeper {
             })
             .await
             .and_then(transform::exists)
-            .map(move |r| (self, r))
     }
 
     /// Return the [`Stat`] of the node of the given `path`, or `None` if the node does not exist.
-    pub async fn exists(self, path: &str) -> Result<(Self, Option<Stat>), failure::Error> {
+    pub async fn exists(&self, path: &str) -> Result<Option<Stat>, failure::Error> {
         self.exists_w(path, Watch::None).await
     }
 
     async fn get_children_w(
-        self,
+        &self,
         path: &str,
         watch: Watch,
-    ) -> Result<(Self, Option<Vec<String>>), failure::Error> {
+    ) -> Result<Option<Vec<String>>, failure::Error> {
         trace!(self.logger, "get_children"; "path" => path, "watch" => ?watch);
         self.connection
             .enqueue(proto::Request::GetChildren {
@@ -551,7 +537,6 @@ impl ZooKeeper {
             })
             .await
             .and_then(transform::get_children)
-            .map(move |r| (self, r))
     }
 
     /// Return the names of the children of the node at the given `path`, or `None` if the node
@@ -559,18 +544,15 @@ impl ZooKeeper {
     ///
     /// The returned list of children is not sorted and no guarantee is provided as to its natural
     /// or lexical order.
-    pub async fn get_children(
-        self,
-        path: &str,
-    ) -> Result<(Self, Option<Vec<String>>), failure::Error> {
+    pub async fn get_children(&self, path: &str) -> Result<Option<Vec<String>>, failure::Error> {
         self.get_children_w(path, Watch::None).await
     }
 
     async fn get_data_w(
-        self,
+        &self,
         path: &str,
         watch: Watch,
-    ) -> Result<(Self, Option<(Vec<u8>, Stat)>), failure::Error> {
+    ) -> Result<Option<(Vec<u8>, Stat)>, failure::Error> {
         trace!(self.logger, "get_data"; "path" => path, "watch" => ?watch);
         self.connection
             .enqueue(proto::Request::GetData {
@@ -579,23 +561,19 @@ impl ZooKeeper {
             })
             .await
             .and_then(transform::get_data)
-            .map(move |r| (self, r))
     }
 
     /// Return the data and the [`Stat`] of the node at the given `path`, or `None` if it does not
     /// exist.
-    pub async fn get_data(
-        self,
-        path: &str,
-    ) -> Result<(Self, Option<(Vec<u8>, Stat)>), failure::Error> {
+    pub async fn get_data(&self, path: &str) -> Result<Option<(Vec<u8>, Stat)>, failure::Error> {
         self.get_data_w(path, Watch::None).await
     }
 
     /// Start building a multi request. Multi requests batch several operations
     /// into one atomic unit.
-    pub fn multi(self) -> MultiBuilder {
+    pub fn multi(&self) -> MultiBuilder {
         MultiBuilder {
-            zk: self,
+            zk: &self,
             requests: Vec::new(),
         }
     }
@@ -605,15 +583,15 @@ impl ZooKeeper {
 ///
 /// Triggered watches produce events on the global watcher stream.
 #[derive(Debug, Clone)]
-pub struct WatchGlobally(ZooKeeper);
+pub struct WatchGlobally<'a>(&'a ZooKeeper);
 
-impl WatchGlobally {
+impl<'a> WatchGlobally<'a> {
     /// Return the [`Stat`] of the node of the given `path`, or `None` if the node does not exist.
     ///
     /// If no errors occur, a watch is left on the node at the given `path`. The watch is triggered
     /// by any successful operation that creates or deletes the node, or sets the node's data. When
     /// the watch triggers, an event is sent to the global watcher stream.
-    pub async fn exists(self, path: &str) -> Result<(ZooKeeper, Option<Stat>), failure::Error> {
+    pub async fn exists(&self, path: &str) -> Result<Option<Stat>, failure::Error> {
         self.0.exists_w(path, Watch::Global).await
     }
 
@@ -627,10 +605,7 @@ impl WatchGlobally {
     /// by any successful operation that deletes the node at the given `path`, or creates or
     /// deletes a child of that node. When the watch triggers, an event is sent to the global
     /// watcher stream.
-    pub async fn get_children(
-        self,
-        path: &str,
-    ) -> Result<(ZooKeeper, Option<Vec<String>>), failure::Error> {
+    pub async fn get_children(&self, path: &str) -> Result<Option<Vec<String>>, failure::Error> {
         self.0.get_children_w(path, Watch::Global).await
     }
 
@@ -640,10 +615,7 @@ impl WatchGlobally {
     /// If no errors occur, a watch is left on the node at the given `path`. The watch is triggered
     /// by any successful operation that sets the node's data, or deletes it. When the watch
     /// triggers, an event is sent to the global watcher stream.
-    pub async fn get_data(
-        self,
-        path: &str,
-    ) -> Result<(ZooKeeper, Option<(Vec<u8>, Stat)>), failure::Error> {
+    pub async fn get_data(&self, path: &str) -> Result<Option<(Vec<u8>, Stat)>, failure::Error> {
         self.0.get_data_w(path, Watch::Global).await
     }
 }
@@ -653,23 +625,23 @@ impl WatchGlobally {
 /// Events from triggered watches are yielded through returned `oneshot` channels. All events are
 /// also produced on the global watcher stream.
 #[derive(Debug, Clone)]
-pub struct WithWatcher(ZooKeeper);
+pub struct WithWatcher<'a>(&'a ZooKeeper);
 
-impl WithWatcher {
+impl<'a> WithWatcher<'a> {
     /// Return the [`Stat`] of the node of the given `path`, or `None` if the node does not exist.
     ///
     /// If no errors occur, a watch will be left on the node at the given `path`. The watch is
     /// triggered by any successful operation that creates or deletes the node, or sets the data on
     /// the node, and in turn causes the included `oneshot::Receiver` to resolve.
     pub async fn exists(
-        self,
+        &self,
         path: &str,
-    ) -> Result<(ZooKeeper, oneshot::Receiver<WatchedEvent>, Option<Stat>), failure::Error> {
+    ) -> Result<(oneshot::Receiver<WatchedEvent>, Option<Stat>), failure::Error> {
         let (tx, rx) = oneshot::channel();
         self.0
             .exists_w(path, Watch::Custom(tx))
             .await
-            .map(|r| (r.0, rx, r.1))
+            .map(|r| (rx, r))
     }
 
     /// Return the names of the children of the node at the given `path`, or `None` if the node
@@ -683,20 +655,14 @@ impl WithWatcher {
     /// deletes a child of that node, and in turn causes the included `oneshot::Receiver` to
     /// resolve.
     pub async fn get_children(
-        self,
+        &self,
         path: &str,
-    ) -> Result<
-        (
-            ZooKeeper,
-            Option<(oneshot::Receiver<WatchedEvent>, Vec<String>)>,
-        ),
-        failure::Error,
-    > {
+    ) -> Result<Option<(oneshot::Receiver<WatchedEvent>, Vec<String>)>, failure::Error> {
         let (tx, rx) = oneshot::channel();
         self.0
             .get_children_w(path, Watch::Custom(tx))
             .await
-            .map(|r| (r.0, r.1.map(move |c| (rx, c))))
+            .map(|r| (r.map(move |c| (rx, c))))
     }
 
     /// Return the data and the [`Stat`] of the node at the given `path`, or `None` if it does not
@@ -706,31 +672,25 @@ impl WithWatcher {
     /// by any successful operation that sets the node's data, or deletes it, and in turn causes
     /// the included `oneshot::Receiver` to resolve.
     pub async fn get_data(
-        self,
+        &self,
         path: &str,
-    ) -> Result<
-        (
-            ZooKeeper,
-            Option<(oneshot::Receiver<WatchedEvent>, Vec<u8>, Stat)>,
-        ),
-        failure::Error,
-    > {
+    ) -> Result<Option<(oneshot::Receiver<WatchedEvent>, Vec<u8>, Stat)>, failure::Error> {
         let (tx, rx) = oneshot::channel();
         self.0
             .get_data_w(path, Watch::Custom(tx))
             .await
-            .map(|r| (r.0, r.1.map(move |(b, s)| (rx, b, s))))
+            .map(|r| (r.map(move |(b, s)| (rx, b, s))))
     }
 }
 
 /// Proxy for [`ZooKeeper`] that batches operations into an atomic "multi" request.
 #[derive(Debug)]
-pub struct MultiBuilder {
-    zk: ZooKeeper,
+pub struct MultiBuilder<'a> {
+    zk: &'a ZooKeeper,
     requests: Vec<proto::Request>,
 }
 
-impl MultiBuilder {
+impl<'a> MultiBuilder<'a> {
     /// Attach a create operation to this multi request.
     ///
     /// See [`ZooKeeper::create`] for details.
@@ -787,9 +747,7 @@ impl MultiBuilder {
     }
 
     /// Run executes the attached requests in one atomic unit.
-    pub async fn run(
-        self,
-    ) -> Result<(ZooKeeper, Vec<Result<MultiResponse, error::Multi>>), failure::Error> {
+    pub async fn run(self) -> Result<Vec<Result<MultiResponse, error::Multi>>, failure::Error> {
         let (zk, requests) = (self.zk, self.requests);
         let reqs_lite: Vec<transform::RequestMarker> = requests.iter().map(|r| r.into()).collect();
         zk.connection
@@ -804,7 +762,6 @@ impl MultiBuilder {
                 Ok(r) => bail!("got non-multi response to multi: {:?}", r),
                 Err(e) => Err(format_err!("multi call failed: {:?}", e)),
             })
-            .map(move |r| (zk, r))
     }
 }
 
@@ -828,11 +785,11 @@ mod tests {
             .connect(&"127.0.0.1:2181".parse().unwrap())
             .await
             .unwrap();
-        let (zk, exists_w, stat) = zk.with_watcher().exists("/foo").await.unwrap();
+        let (exists_w, stat) = zk.with_watcher().exists("/foo").await.unwrap();
         assert_eq!(stat, None);
-        let (zk, stat) = zk.watch().exists("/foo").await.unwrap();
+        let stat = zk.watch().exists("/foo").await.unwrap();
         assert_eq!(stat, None);
-        let (zk, path) = zk
+        let path = zk
             .create(
                 "/foo",
                 &b"Hello world"[..],
@@ -854,27 +811,27 @@ mod tests {
                 path: String::from("/foo"),
             }
         );
-        let (zk, stat) = zk.watch().exists("/foo").await.unwrap();
+        let stat = zk.watch().exists("/foo").await.unwrap();
         assert_eq!(stat.unwrap().data_length as usize, b"Hello world".len());
-        let (zk, res) = zk.get_acl("/foo").await.unwrap();
+        let res = zk.get_acl("/foo").await.unwrap();
         let (acl, _) = res.unwrap();
         assert_eq!(acl, Acl::open_unsafe());
-        let (zk, res) = zk.get_data("/foo").await.unwrap();
+        let res = zk.get_data("/foo").await.unwrap();
         let data = b"Hello world";
         let res = res.unwrap();
         assert_eq!(res.0, data);
         assert_eq!(res.1.data_length as usize, data.len());
-        let (zk, stat) = zk
+        let stat = zk
             .set_data("/foo", Some(res.1.version), &b"Bye world"[..])
             .await
             .unwrap();
         assert_eq!(stat.unwrap().data_length as usize, "Bye world".len());
-        let (zk, res) = zk.get_data("/foo").await.unwrap();
+        let res = zk.get_data("/foo").await.unwrap();
         let data = b"Bye world";
         let res = res.unwrap();
         assert_eq!(res.0, data);
         assert_eq!(res.1.data_length as usize, data.len());
-        let (zk, path) = zk
+        let path = zk
             .create(
                 "/foo/bar",
                 &b"Hello bar"[..],
@@ -884,22 +841,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(path.as_deref(), Ok("/foo/bar"));
-        let (zk, children) = zk.get_children("/foo").await.unwrap();
+        let children = zk.get_children("/foo").await.unwrap();
         assert_eq!(children, Some(vec!["bar".to_string()]));
-        let (zk, res) = zk.get_data("/foo/bar").await.unwrap();
+        let res = zk.get_data("/foo/bar").await.unwrap();
         let data = b"Hello bar";
         let res = res.unwrap();
         assert_eq!(res.0, data);
         assert_eq!(res.1.data_length as usize, data.len());
         // add a new exists watch so we'll get notified of delete
-        let (zk, _) = zk.watch().exists("/foo").await.unwrap();
-        let (zk, res) = zk.delete("/foo", None).await.unwrap();
+        let _ = zk.watch().exists("/foo").await.unwrap();
+        let res = zk.delete("/foo", None).await.unwrap();
         assert_eq!(res, Err(error::Delete::NotEmpty));
-        let (zk, res) = zk.delete("/foo/bar", None).await.unwrap();
+        let res = zk.delete("/foo/bar", None).await.unwrap();
         assert_eq!(res, Ok(()));
-        let (zk, res) = zk.delete("/foo", None).await.unwrap();
+        let res = zk.delete("/foo", None).await.unwrap();
         assert_eq!(res, Ok(()));
-        let (zk, stat) = zk.watch().exists("/foo").await.unwrap();
+        let stat = zk.watch().exists("/foo").await.unwrap();
         assert_eq!(stat, None);
         let (event, w) = w.into_future().await;
         assert_eq!(
@@ -941,11 +898,11 @@ mod tests {
 
         // let's first check if /example exists. the .watch() causes us to be notified
         // the next time the "exists" status of /example changes after the call.
-        let (zk, stat) = zk.watch().exists("/example").await.unwrap();
+        let stat = zk.watch().exists("/example").await.unwrap();
         // initially, /example does not exist
         assert_eq!(stat, None);
         // so let's make it!
-        let (zk, path) = zk
+        let path = zk
             .create(
                 "/example",
                 &b"Hello world"[..],
@@ -957,27 +914,27 @@ mod tests {
         assert_eq!(path.as_deref(), Ok("/example"));
 
         // does it exist now?
-        let (zk, stat) = zk.watch().exists("/example").await.unwrap();
+        let stat = zk.watch().exists("/example").await.unwrap();
         // looks like it!
         // note that the creation above also triggered our "exists" watch!
         assert_eq!(stat.unwrap().data_length as usize, b"Hello world".len());
 
         // did the data get set correctly?
-        let (zk, res) = zk.get_data("/example").await.unwrap();
+        let res = zk.get_data("/example").await.unwrap();
         let data = b"Hello world";
         let res = res.unwrap();
         assert_eq!(res.0, data);
         assert_eq!(res.1.data_length as usize, data.len());
 
         // let's update the data.
-        let (zk, stat) = zk
+        let stat = zk
             .set_data("/example", Some(res.1.version), &b"Bye world"[..])
             .await
             .unwrap();
         assert_eq!(stat.unwrap().data_length as usize, "Bye world".len());
 
         // create a child of /example
-        let (zk, path) = zk
+        let path = zk
             .create(
                 "/example/more",
                 &b"Hello more"[..],
@@ -989,24 +946,20 @@ mod tests {
         assert_eq!(path.as_deref(), Ok("/example/more"));
 
         // it should be visible as a child of /example
-        let (zk, children) = zk.get_children("/example").await.unwrap();
+        let children = zk.get_children("/example").await.unwrap();
         assert_eq!(children, Some(vec!["more".to_string()]));
 
         // it is not legal to delete a node that has children directly
-        let (zk, res) = zk.delete("/example", None).await.unwrap();
+        let res = zk.delete("/example", None).await.unwrap();
         assert_eq!(res, Err(error::Delete::NotEmpty));
         // instead we must delete the children first
-        zk.delete("/example/more", None)
-            .inspect_ok(|(_, res)| assert_eq!(res, &Ok(())))
-            .and_then(|(zk, _)| zk.delete("/example", None))
-            .inspect_ok(|(_, res)| assert_eq!(res, &Ok(())))
-            .and_then(|(zk, _)| {
-                // no /example should no longer exist!
-                zk.exists("/example")
-            })
-            .inspect_ok(|(_, stat)| assert_eq!(stat, &None))
-            .await
-            .unwrap();
+        let res = zk.delete("/example/more", None).await.unwrap();
+        assert_eq!(res, Ok(()));
+        let res = zk.delete("/example", None).await.unwrap();
+        assert_eq!(res, Ok(()));
+        // no /example should no longer exist!
+        let stat = zk.exists("/example").await.unwrap();
+        assert_eq!(stat, None);
 
         // now let's check that the .watch().exists we did in the very
         // beginning actually triggered!
@@ -1032,7 +985,7 @@ mod tests {
         let (zk, _) = (builder.connect(&"127.0.0.1:2181".parse().unwrap()))
             .await
             .unwrap();
-        let (zk, _) = zk
+        let _ = zk
             .create(
                 "/acl_test",
                 &b"foo"[..],
@@ -1042,33 +995,33 @@ mod tests {
             .await
             .unwrap();
 
-        let (zk, res) = zk.get_acl("/acl_test").await.unwrap();
+        let res = zk.get_acl("/acl_test").await.unwrap();
         let res = res.unwrap();
         assert_eq!(res.0, Acl::open_unsafe());
 
-        let (zk, res) = zk
+        let res = zk
             .set_acl("/acl_test", Acl::creator_all(), Some(res.1.version))
             .await
             .unwrap();
         // a not authenticated user is not able to set `auth` scheme acls.
         assert_eq!(res, Err(error::SetAcl::InvalidAcl));
 
-        let (zk, stat) = zk
+        let stat = zk
             .set_acl("/acl_test", Acl::read_unsafe(), None)
             .await
             .unwrap();
         // successfully change node acl to `read_unsafe`
         assert_eq!(stat.unwrap().data_length as usize, b"foo".len());
 
-        let (zk, res) = zk.get_acl("/acl_test").await.unwrap();
+        let res = zk.get_acl("/acl_test").await.unwrap();
         let res = res.unwrap();
         assert_eq!(res.0, Acl::read_unsafe());
 
-        let (zk, res) = zk.set_data("/acl_test", None, &b"bar"[..]).await.unwrap();
+        let res = zk.set_data("/acl_test", None, &b"bar"[..]).await.unwrap();
         // cannot set data on a read only node
         assert_eq!(res, Err(error::SetData::NoAuth));
 
-        let (zk, res) = zk
+        let res = zk
             .set_acl("/acl_test", Acl::open_unsafe(), None)
             .await
             .unwrap();
@@ -1086,22 +1039,21 @@ mod tests {
         let drain = slog_async::Async::new(drain).build().fuse();
         builder.set_logger(slog::Logger::root(drain, o!()));
 
-        let check_exists = |mut zk: ZooKeeper, paths: &'static [&'static str]| async move {
+        async fn check_exists(zk: &ZooKeeper, paths: &[&str]) -> Result<Vec<bool>, failure::Error> {
             let mut res = Vec::new();
             for p in paths {
-                let (zk2, exists) = zk.exists(p).await?;
-                zk = zk2;
+                let exists = zk.exists(p).await?;
                 res.push(exists.is_some());
             }
-            Result::<_, failure::Error>::Ok((zk, res))
-        };
+            Result::<_, failure::Error>::Ok(res)
+        }
 
         let (zk, _) = builder
             .connect(&"127.0.0.1:2181".parse().unwrap())
             .await
             .unwrap();
 
-        let (zk, res) = zk
+        let res = zk
             .multi()
             .create("/b", &b"a"[..], Acl::open_unsafe(), CreateMode::Persistent)
             .create("/c", &b"b"[..], Acl::open_unsafe(), CreateMode::Persistent)
@@ -1116,10 +1068,10 @@ mod tests {
             ]
         );
 
-        let (zk, res) = check_exists(zk, &["/a", "/b", "/c", "/d"]).await.unwrap();
+        let res = check_exists(&zk, &["/a", "/b", "/c", "/d"]).await.unwrap();
         assert_eq!(res, &[false, true, true, false]);
 
-        let (zk, res) = zk
+        let res = zk
             .multi()
             .create("/a", &b"a"[..], Acl::open_unsafe(), CreateMode::Persistent)
             .create("/b", &b"b"[..], Acl::open_unsafe(), CreateMode::Persistent)
@@ -1138,10 +1090,10 @@ mod tests {
             ]
         );
 
-        let (zk, res) = check_exists(zk, &["/a", "/b", "/c", "/d"]).await.unwrap();
+        let res = check_exists(&zk, &["/a", "/b", "/c", "/d"]).await.unwrap();
         assert_eq!(res, &[false, true, true, false]);
 
-        let (zk, res) = zk
+        let res = zk
             .multi()
             .set_data("/b", None, &b"garbaggio"[..])
             .run()
@@ -1154,7 +1106,7 @@ mod tests {
             _ => panic!("unexpected response: {:?}", res),
         }
 
-        let (zk, res) = zk
+        let res = zk
             .multi()
             .check("/b", 0)
             .delete("/c", None)
@@ -1171,12 +1123,12 @@ mod tests {
             ]
         );
 
-        let (zk, res) = check_exists(zk, &["/a", "/b", "/c", "/d"]).await.unwrap();
+        let res = check_exists(&zk, &["/a", "/b", "/c", "/d"]).await.unwrap();
         assert_eq!(res, &[false, true, true, false]);
-        let (zk, res) = zk.multi().check("/a", 0).run().await.unwrap();
+        let res = zk.multi().check("/a", 0).run().await.unwrap();
         assert_eq!(res, &[Err(error::Multi::Check(error::Check::NoNode)),]);
 
-        let (zk, res) = zk
+        let res = zk
             .multi()
             .check("/b", 1)
             .delete("/b", None)
@@ -1195,7 +1147,7 @@ mod tests {
             ]
         );
 
-        let (zk, res) = check_exists(zk, &["/a", "/b", "/c", "/d"]).await.unwrap();
+        let res = check_exists(&zk, &["/a", "/b", "/c", "/d"]).await.unwrap();
         assert_eq!(res, [false, false, false, false]);
 
         drop(zk); // make Packetizer idle
