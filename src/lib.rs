@@ -499,13 +499,13 @@ impl ZooKeeper {
 impl ZooKeeper {
     /// Add a global watch for the next chained operation.
     pub fn watch(&self) -> WatchGlobally {
-        WatchGlobally(&self)
+        WatchGlobally(self)
     }
 
     /// Add a watch for the next chained operation, and return a future for any received event
     /// along with the operation's (successful) result.
     pub fn with_watcher(&self) -> WithWatcher {
-        WithWatcher(&self)
+        WithWatcher(self)
     }
 
     async fn exists_w(&self, path: &str, watch: Watch) -> Result<Option<Stat>, failure::Error> {
@@ -573,7 +573,7 @@ impl ZooKeeper {
     /// into one atomic unit.
     pub fn multi(&self) -> MultiBuilder {
         MultiBuilder {
-            zk: &self,
+            zk: self,
             requests: Vec::new(),
         }
     }
