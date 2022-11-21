@@ -844,172 +844,121 @@ mod tests {
     use futures::{FutureExt, StreamExt};
     use slog::Drain;
 
-    #[test]
-    fn it_works() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+    #[tokio::test]
+    async fn it_works() {
         let mut builder = ZooKeeperBuilder::default();
         let decorator = slog_term::TermDecorator::new().build();
         let drain = slog_term::FullFormat::new(decorator).build().fuse();
         let drain = slog_async::Async::new(drain).build().fuse();
         builder.set_logger(slog::Logger::root(drain, o!()));
 
-        let (zk, w): (ZooKeeper, _) = rt
-            .block_on(
-                builder
-                    .connect(&"127.0.0.1:2181".parse().unwrap())
-                    .and_then(|(zk, w)| {
-                        zk.with_watcher()
-                            .exists("/foo")
-                            .inspect_ok(|(_, _, stat)| assert_eq!(stat, &None))
-                            .and_then(|(zk, exists_w, _)| {
-                                zk.watch()
-                                    .exists("/foo")
-                                    .map_ok(move |(zk, x)| (zk, x, exists_w))
-                            })
-                            .inspect_ok(|(_, stat, _)| assert_eq!(stat, &None))
-                            .and_then(|(zk, _, exists_w)| {
-                                zk.create(
-                                    "/foo",
-                                    &b"Hello world"[..],
-                                    Acl::open_unsafe(),
-                                    CreateMode::Persistent,
-                                )
-                                .map_ok(move |(zk, x)| (zk, x, exists_w))
-                            })
-                            .inspect_ok(|(_, ref path, _)| {
-                                assert_eq!(path.as_ref().map(String::as_str), Ok("/foo"))
-                            })
-                            .and_then(move |(zk, _, exists_w)| {
-                                exists_w
-                                    .map_ok(move |w| (zk, w))
-                                    .map_err(|e| format_err!("exists_w failed: {:?}", e))
-                            })
-                            .inspect_ok(|(_, event)| {
-                                assert_eq!(
-                                    event,
-                                    &WatchedEvent {
-                                        event_type: WatchedEventType::NodeCreated,
-                                        keeper_state: KeeperState::SyncConnected,
-                                        path: String::from("/foo"),
-                                    }
-                                );
-                            })
-                            .and_then(|(zk, _)| zk.watch().exists("/foo"))
-                            .inspect_ok(|(_, stat)| {
-                                assert_eq!(stat.unwrap().data_length as usize, b"Hello world".len())
-                            })
-                            .and_then(|(zk, _)| zk.get_acl("/foo"))
-                            .inspect_ok(|(_, res)| {
-                                let res = res.as_ref().unwrap();
-                                assert_eq!(res.0, Acl::open_unsafe())
-                            })
-                            .and_then(|(zk, _)| zk.get_data("/foo"))
-                            .inspect_ok(|(_, res)| {
-                                let data = b"Hello world";
-                                let res = res.as_ref().unwrap();
-                                assert_eq!(res.0, data);
-                                assert_eq!(res.1.data_length as usize, data.len());
-                            })
-                            .and_then(|(zk, res)| {
-                                zk.set_data("/foo", Some(res.unwrap().1.version), &b"Bye world"[..])
-                            })
-                            .inspect_ok(|(_, stat)| {
-                                assert_eq!(stat.unwrap().data_length as usize, "Bye world".len());
-                            })
-                            .and_then(|(zk, _)| zk.get_data("/foo"))
-                            .inspect_ok(|(_, res)| {
-                                let data = b"Bye world";
-                                let res = res.as_ref().unwrap();
-                                assert_eq!(res.0, data);
-                                assert_eq!(res.1.data_length as usize, data.len());
-                            })
-                            .and_then(|(zk, _)| {
-                                zk.create(
-                                    "/foo/bar",
-                                    &b"Hello bar"[..],
-                                    Acl::open_unsafe(),
-                                    CreateMode::Persistent,
-                                )
-                            })
-                            .inspect_ok(|(_, ref path)| {
-                                assert_eq!(path.as_ref().map(String::as_str), Ok("/foo/bar"))
-                            })
-                            .and_then(|(zk, _)| zk.get_children("/foo"))
-                            .inspect_ok(|(_, children)| {
-                                assert_eq!(children, &Some(vec!["bar".to_string()]));
-                            })
-                            .and_then(|(zk, _)| zk.get_data("/foo/bar"))
-                            .inspect_ok(|(_, res)| {
-                                let data = b"Hello bar";
-                                let res = res.as_ref().unwrap();
-                                assert_eq!(res.0, data);
-                                assert_eq!(res.1.data_length as usize, data.len());
-                            })
-                            .and_then(|(zk, _)| {
-                                // add a new exists watch so we'll get notified of delete
-                                zk.watch().exists("/foo")
-                            })
-                            .and_then(|(zk, _)| zk.delete("/foo", None))
-                            .inspect_ok(|(_, res)| assert_eq!(res, &Err(error::Delete::NotEmpty)))
-                            .and_then(|(zk, _)| zk.delete("/foo/bar", None))
-                            .inspect_ok(|(_, res)| assert_eq!(res, &Ok(())))
-                            .and_then(|(zk, _)| zk.delete("/foo", None))
-                            .inspect_ok(|(_, res)| assert_eq!(res, &Ok(())))
-                            .and_then(|(zk, _)| zk.watch().exists("/foo"))
-                            .inspect_ok(|(_, stat)| assert_eq!(stat, &None))
-                            .and_then(move |(zk, _)| {
-                                w.into_future().map(move |x| (zk, x)).map(Ok)
-                                // .map_err(|e| format_err!("stream error: {:?}", e.0))
-                            })
-                            .inspect_ok(|(_, (event, _))| {
-                                assert_eq!(
-                                    event,
-                                    &Some(WatchedEvent {
-                                        event_type: WatchedEventType::NodeCreated,
-                                        keeper_state: KeeperState::SyncConnected,
-                                        path: String::from("/foo"),
-                                    })
-                                );
-                            })
-                            .and_then(|(zk, (_, w))| {
-                                w.into_future().map(move |x| (zk, x)).map(Ok)
-                                // .map_err(|e| format_err!("stream error: {:?}", e.0))
-                            })
-                            .and_then(|(zk, (event, w))| {
-                                assert_eq!(
-                                    event,
-                                    Some(WatchedEvent {
-                                        event_type: WatchedEventType::NodeDataChanged,
-                                        keeper_state: KeeperState::SyncConnected,
-                                        path: String::from("/foo"),
-                                    })
-                                );
-
-                                w.into_future().map(move |x| (zk, x)).map(Ok)
-                                // .map_err(|e| format_err!("stream error: {:?}", e.0))
-                            })
-                            .inspect_ok(|(_, (event, _))| {
-                                assert_eq!(
-                                    event,
-                                    &Some(WatchedEvent {
-                                        event_type: WatchedEventType::NodeDeleted,
-                                        keeper_state: KeeperState::SyncConnected,
-                                        path: String::from("/foo"),
-                                    })
-                                );
-                            })
-                            .map_ok(|(zk, (_, w))| (zk, w))
-                    }),
-            )
+        let (zk, w) = builder
+            .connect(&"127.0.0.1:2181".parse().unwrap())
+            .await
             .unwrap();
+        let (zk, exists_w, stat) = zk.with_watcher().exists("/foo").await.unwrap();
+        assert_eq!(stat, None);
+        let (zk, stat) = zk.watch().exists("/foo").await.unwrap();
+        assert_eq!(stat, None);
+        let (zk, path) = zk
+            .create(
+                "/foo",
+                &b"Hello world"[..],
+                Acl::open_unsafe(),
+                CreateMode::Persistent,
+            )
+            .await
+            .unwrap();
+        assert_eq!(path.as_ref().map(String::as_str), Ok("/foo"));
+        let event = exists_w
+            .map_err(|e| format_err!("exists_w failed: {:?}", e))
+            .await
+            .unwrap();
+        assert_eq!(
+            event,
+            WatchedEvent {
+                event_type: WatchedEventType::NodeCreated,
+                keeper_state: KeeperState::SyncConnected,
+                path: String::from("/foo"),
+            }
+        );
+        let (zk, stat) = zk.watch().exists("/foo").await.unwrap();
+        assert_eq!(stat.unwrap().data_length as usize, b"Hello world".len());
+        let (zk, res) = zk.get_acl("/foo").await.unwrap();
+        let (acl, _) = res.unwrap();
+        assert_eq!(acl, Acl::open_unsafe());
+        let (zk, res) = zk.get_data("/foo").await.unwrap();
+        let data = b"Hello world";
+        let res = res.unwrap();
+        assert_eq!(res.0, data);
+        assert_eq!(res.1.data_length as usize, data.len());
+        let (zk, stat) = zk
+            .set_data("/foo", Some(res.1.version), &b"Bye world"[..])
+            .await
+            .unwrap();
+        assert_eq!(stat.unwrap().data_length as usize, "Bye world".len());
+        let (zk, res) = zk.get_data("/foo").await.unwrap();
+        let data = b"Bye world";
+        let res = res.unwrap();
+        assert_eq!(res.0, data);
+        assert_eq!(res.1.data_length as usize, data.len());
+        let (zk, path) = zk
+            .create(
+                "/foo/bar",
+                &b"Hello bar"[..],
+                Acl::open_unsafe(),
+                CreateMode::Persistent,
+            )
+            .await
+            .unwrap();
+        assert_eq!(path.as_deref(), Ok("/foo/bar"));
+        let (zk, children) = zk.get_children("/foo").await.unwrap();
+        assert_eq!(children, Some(vec!["bar".to_string()]));
+        let (zk, res) = zk.get_data("/foo/bar").await.unwrap();
+        let data = b"Hello bar";
+        let res = res.unwrap();
+        assert_eq!(res.0, data);
+        assert_eq!(res.1.data_length as usize, data.len());
+        // add a new exists watch so we'll get notified of delete
+        let (zk, _) = zk.watch().exists("/foo").await.unwrap();
+        let (zk, res) = zk.delete("/foo", None).await.unwrap();
+        assert_eq!(res, Err(error::Delete::NotEmpty));
+        let (zk, res) = zk.delete("/foo/bar", None).await.unwrap();
+        assert_eq!(res, Ok(()));
+        let (zk, res) = zk.delete("/foo", None).await.unwrap();
+        assert_eq!(res, Ok(()));
+        let (zk, stat) = zk.watch().exists("/foo").await.unwrap();
+        assert_eq!(stat, None);
+        let (event, w) = w.into_future().await;
+        assert_eq!(
+            event,
+            Some(WatchedEvent {
+                event_type: WatchedEventType::NodeCreated,
+                keeper_state: KeeperState::SyncConnected,
+                path: String::from("/foo"),
+            })
+        );
+        let (event, w) = w.into_future().await;
+        assert_eq!(
+            event,
+            Some(WatchedEvent {
+                event_type: WatchedEventType::NodeDataChanged,
+                keeper_state: KeeperState::SyncConnected,
+                path: String::from("/foo"),
+            })
+        );
+        let (event, w) = w.into_future().await;
+        assert_eq!(
+            event,
+            Some(WatchedEvent {
+                event_type: WatchedEventType::NodeDeleted,
+                keeper_state: KeeperState::SyncConnected,
+                path: String::from("/foo"),
+            })
+        );
 
         drop(zk); // make Packetizer idle
-        drop(rt);
-        // rt.shutdown_on_idle().wait().unwrap();
-        assert_eq!(futures::executor::block_on(w.count()), 0);
+        assert_eq!(w.count().await, 0);
     }
 
     #[test]
