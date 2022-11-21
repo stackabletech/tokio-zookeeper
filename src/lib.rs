@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 //! This crate provides a client for interacting with [Apache
 //! ZooKeeper](https://zookeeper.apache.org/), a highly reliable distributed service for
 //! maintaining configuration information, naming, providing distributed synchronization, and
@@ -100,18 +102,20 @@
 //! # A somewhat silly example
 //!
 //! ```no_run
+//! #![recursion_limit = "512"]
 //! use tokio_zookeeper::*;
-//! use tokio::prelude::*;
+//! use failure::format_err;
+//! use futures::prelude::*;
 //!
-//! # fn main() {
-//! tokio::run(
+//! # #[tokio::main(flavor = "current_thread")]
+//! # async fn main() {
 //!     ZooKeeper::connect(&"127.0.0.1:2181".parse().unwrap())
 //!         .and_then(|(zk, default_watcher)| {
 //!             // let's first check if /example exists. the .watch() causes us to be notified
 //!             // the next time the "exists" status of /example changes after the call.
 //!             zk.watch()
 //!                 .exists("/example")
-//!                 .inspect(|(_, stat)| {
+//!                 .inspect_ok(|(_, stat)| {
 //!                     // initially, /example does not exist
 //!                     assert_eq!(stat, &None)
 //!                 })
@@ -124,14 +128,14 @@
 //!                         CreateMode::Persistent,
 //!                     )
 //!                 })
-//!                 .inspect(|(_, ref path)| {
+//!                 .inspect_ok(|(_, ref path)| {
 //!                     assert_eq!(path.as_ref().map(String::as_str), Ok("/example"))
 //!                 })
 //!                 .and_then(|(zk, _)| {
 //!                     // does it exist now?
 //!                     zk.watch().exists("/example")
 //!                 })
-//!                 .inspect(|(_, stat)| {
+//!                 .inspect_ok(|(_, stat)| {
 //!                     // looks like it!
 //!                     // note that the creation above also triggered our "exists" watch!
 //!                     assert_eq!(stat.unwrap().data_length as usize, b"Hello world".len())
@@ -140,7 +144,7 @@
 //!                     // did the data get set correctly?
 //!                     zk.get_data("/example")
 //!                 })
-//!                 .inspect(|(_, res)| {
+//!                 .inspect_ok(|(_, res)| {
 //!                     let data = b"Hello world";
 //!                     let res = res.as_ref().unwrap();
 //!                     assert_eq!(res.0, data);
@@ -150,7 +154,7 @@
 //!                     // let's update the data.
 //!                     zk.set_data("/example", Some(res.unwrap().1.version), &b"Bye world"[..])
 //!                 })
-//!                 .inspect(|(_, stat)| {
+//!                 .inspect_ok(|(_, stat)| {
 //!                     assert_eq!(stat.unwrap().data_length as usize, "Bye world".len());
 //!                 })
 //!                 .and_then(|(zk, _)| {
@@ -162,42 +166,43 @@
 //!                         CreateMode::Persistent,
 //!                     )
 //!                 })
-//!                 .inspect(|(_, ref path)| {
+//!                 .inspect_ok(|(_, ref path)| {
 //!                     assert_eq!(path.as_ref().map(String::as_str), Ok("/example/more"))
 //!                 })
 //!                 .and_then(|(zk, _)| {
 //!                     // it should be visible as a child of /example
 //!                     zk.get_children("/example")
 //!                 })
-//!                 .inspect(|(_, children)| {
+//!                 .inspect_ok(|(_, children)| {
 //!                     assert_eq!(children, &Some(vec!["more".to_string()]));
 //!                 })
 //!                 .and_then(|(zk, _)| {
 //!                     // it is not legal to delete a node that has children directly
 //!                     zk.delete("/example", None)
 //!                 })
-//!                 .inspect(|(_, res)| assert_eq!(res, &Err(error::Delete::NotEmpty)))
+//!                 .inspect_ok(|(_, res)| assert_eq!(res, &Err(error::Delete::NotEmpty)))
 //!                 .and_then(|(zk, _)| {
 //!                     // instead we must delete the children first
 //!                     zk.delete("/example/more", None)
 //!                 })
-//!                 .inspect(|(_, res)| assert_eq!(res, &Ok(())))
+//!                 .inspect_ok(|(_, res)| assert_eq!(res, &Ok(())))
 //!                 .and_then(|(zk, _)| zk.delete("/example", None))
-//!                 .inspect(|(_, res)| assert_eq!(res, &Ok(())))
+//!                 .inspect_ok(|(_, res)| assert_eq!(res, &Ok(())))
 //!                 .and_then(|(zk, _)| {
 //!                     // no /example should no longer exist!
 //!                     zk.exists("/example")
 //!                 })
-//!                 .inspect(|(_, stat)| assert_eq!(stat, &None))
+//!                 .inspect_ok(|(_, stat)| assert_eq!(stat, &None))
 //!                 .and_then(move |(zk, _)| {
 //!                     // now let's check that the .watch().exists we did in the very
 //!                     // beginning actually triggered!
 //!                     default_watcher
 //!                         .into_future()
 //!                         .map(move |x| (zk, x))
-//!                         .map_err(|e| format_err!("stream error: {:?}", e.0))
+//!                         .map(Ok)
+//!                         // .map_err(|e| format_err!("stream error: {:?}", e.0))
 //!                 })
-//!                 .inspect(|(_, (event, _))| {
+//!                 .inspect_ok(|(_, (event, _))| {
 //!                     assert_eq!(
 //!                         event,
 //!                         &Some(WatchedEvent {
@@ -208,9 +213,9 @@
 //!                     );
 //!                 })
 //!         })
-//!         .map(|_| ())
-//!         .map_err(|e| panic!("{:?}", e)),
-//! );
+//!         .map_ok(|_| ())
+//!         .map_err(|e| panic!("{:?}", e))
+//!         .await;
 //! # }
 //! ```
 
@@ -219,10 +224,9 @@
 #![deny(missing_copy_implementations)]
 
 use failure::{bail, format_err};
-use futures::{channel::oneshot, Stream};
+use futures::{channel::oneshot, Stream, TryFutureExt};
 use slog::{debug, o, trace};
 use std::borrow::Cow;
-use std::future::Future;
 use std::net::SocketAddr;
 use std::time;
 
@@ -297,19 +301,17 @@ impl ZooKeeperBuilder {
     /// If the connection to the server fails, the client will automatically try to re-connect.
     /// Only if re-connection fails is an error returned to the client. Requests that are in-flight
     /// during a disconnect may fail and have to be retried.
-    pub fn connect(
+    pub async fn connect(
         self,
         addr: &SocketAddr,
-    ) -> impl Future<
-        Item = (ZooKeeper, impl Stream<Item = WatchedEvent, Error = ()>),
-        Error = failure::Error,
-    > {
+    ) -> Result<(ZooKeeper, impl Stream<Item = WatchedEvent>), failure::Error> {
         let (tx, rx) = futures::channel::mpsc::unbounded();
         let addr = *addr;
         tokio::net::TcpStream::connect(&addr)
             .map_err(failure::Error::from)
             .and_then(move |stream| self.handshake(addr, stream, tx))
-            .map(move |zk| (zk, rx))
+            .map_ok(move |zk| (zk, rx))
+            .await
     }
 
     /// Set the ZooKeeper [session expiry
@@ -328,12 +330,12 @@ impl ZooKeeperBuilder {
         self.logger = l;
     }
 
-    fn handshake(
+    async fn handshake(
         self,
         addr: SocketAddr,
         stream: tokio::net::TcpStream,
         default_watcher: futures::channel::mpsc::UnboundedSender<WatchedEvent>,
-    ) -> impl Future<Item = ZooKeeper, Error = failure::Error> {
+    ) -> Result<ZooKeeper, failure::Error> {
         let request = proto::Request::Connect {
             protocol_version: 0,
             last_zxid_seen: 0,
@@ -347,7 +349,7 @@ impl ZooKeeperBuilder {
 
         let plog = self.logger.clone();
         let enqueuer = proto::Packetizer::new(addr, stream, plog, default_watcher);
-        enqueuer.enqueue(request).map(move |response| {
+        enqueuer.enqueue(request).await.map(move |response| {
             trace!(self.logger, "{:?}", response);
             ZooKeeper {
                 connection: enqueuer,
@@ -361,11 +363,10 @@ impl ZooKeeper {
     /// Connect to a ZooKeeper server instance at the given address with default parameters.
     ///
     /// See [`ZooKeeperBuilder::connect`].
-    pub fn connect(
+    pub async fn connect(
         addr: &SocketAddr,
-    ) -> impl Future<Item = (Self, impl Stream<Item = WatchedEvent, Error = ()>), Error = failure::Error>
-    {
-        ZooKeeperBuilder::default().connect(addr)
+    ) -> Result<(Self, impl Stream<Item = WatchedEvent>), failure::Error> {
+        ZooKeeperBuilder::default().connect(addr).await
     }
 
     /// Create a node with the given `path` with `data` as its contents.
@@ -397,13 +398,13 @@ impl ZooKeeper {
     /// calls.
     ///
     /// The maximum allowable size of the data array is 1 MB (1,048,576 bytes).
-    pub fn create<D, A>(
+    pub async fn create<D, A>(
         self,
         path: &str,
         data: D,
         acl: A,
         mode: CreateMode,
-    ) -> impl Future<Item = (Self, Result<String, error::Create>), Error = failure::Error>
+    ) -> Result<(Self, Result<String, error::Create>), failure::Error>
     where
         D: Into<Cow<'static, [u8]>>,
         A: Into<Cow<'static, [Acl]>>,
@@ -417,6 +418,7 @@ impl ZooKeeper {
                 acl: acl.into(),
                 mode,
             })
+            .await
             .and_then(transform::create)
             .map(move |r| (self, r))
     }
@@ -431,12 +433,12 @@ impl ZooKeeper {
     /// left by `get_data` calls.
     ///
     /// The maximum allowable size of the data array is 1 MB (1,048,576 bytes).
-    pub fn set_data<D>(
+    pub async fn set_data<D>(
         self,
         path: &str,
         version: Option<i32>,
         data: D,
-    ) -> impl Future<Item = (Self, Result<Stat, error::SetData>), Error = failure::Error>
+    ) -> Result<(Self, Result<Stat, error::SetData>), failure::Error>
     where
         D: Into<Cow<'static, [u8]>>,
     {
@@ -449,6 +451,7 @@ impl ZooKeeper {
                 version,
                 data,
             })
+            .await
             .and_then(move |r| transform::set_data(version, r))
             .map(move |r| (self, r))
     }
@@ -461,11 +464,11 @@ impl ZooKeeper {
     /// This operation, if successful, will trigger all the watches on the node of the given `path`
     /// left by `exists` API calls, and the watches on the parent node left by `get_children` API
     /// calls.
-    pub fn delete(
+    pub async fn delete(
         self,
         path: &str,
         version: Option<i32>,
-    ) -> impl Future<Item = (Self, Result<(), error::Delete>), Error = failure::Error> {
+    ) -> Result<(Self, Result<(), error::Delete>), failure::Error> {
         trace!(self.logger, "delete"; "path" => path, "version" => ?version);
         let version = version.unwrap_or(-1);
         self.connection
@@ -473,6 +476,7 @@ impl ZooKeeper {
                 path: path.to_string(),
                 version,
             })
+            .await
             .and_then(move |r| transform::delete(version, r))
             .map(move |r| (self, r))
     }
@@ -482,16 +486,16 @@ impl ZooKeeper {
     ///
     /// If no node exists for the given path, the returned future resolves with an error of
     /// [`error::GetAcl::NoNode`].
-    pub fn get_acl(
+    pub async fn get_acl(
         self,
         path: &str,
-    ) -> impl Future<Item = (Self, Result<(Vec<Acl>, Stat), error::GetAcl>), Error = failure::Error>
-    {
+    ) -> Result<(Self, Result<(Vec<Acl>, Stat), error::GetAcl>), failure::Error> {
         trace!(self.logger, "get_acl"; "path" => path);
         self.connection
             .enqueue(proto::Request::GetAcl {
                 path: path.to_string(),
             })
+            .await
             .and_then(transform::get_acl)
             .map(move |r| (self, r))
     }
@@ -505,12 +509,12 @@ impl ZooKeeper {
     /// If no node exists for the given path, the returned future resolves with an error of
     /// [`error::SetAcl::NoNode`]. If the given `version` does not match the ACL version, the
     /// returned future resolves with an error of [`error::SetAcl::BadVersion`].
-    pub fn set_acl<A>(
+    pub async fn set_acl<A>(
         self,
         path: &str,
         acl: A,
         version: Option<i32>,
-    ) -> impl Future<Item = (Self, Result<Stat, error::SetAcl>), Error = failure::Error>
+    ) -> Result<(Self, Result<Stat, error::SetAcl>), failure::Error>
     where
         A: Into<Cow<'static, [Acl]>>,
     {
@@ -522,6 +526,7 @@ impl ZooKeeper {
                 acl: acl.into(),
                 version,
             })
+            .await
             .and_then(move |r| transform::set_acl(version, r))
             .map(move |r| (self, r))
     }
@@ -539,40 +544,39 @@ impl ZooKeeper {
         WithWatcher(self)
     }
 
-    fn exists_w(
+    async fn exists_w(
         self,
         path: &str,
         watch: Watch,
-    ) -> impl Future<Item = (Self, Option<Stat>), Error = failure::Error> {
+    ) -> Result<(Self, Option<Stat>), failure::Error> {
         trace!(self.logger, "exists"; "path" => path, "watch" => ?watch);
         self.connection
             .enqueue(proto::Request::Exists {
                 path: path.to_string(),
                 watch,
             })
+            .await
             .and_then(transform::exists)
             .map(move |r| (self, r))
     }
 
     /// Return the [`Stat`] of the node of the given `path`, or `None` if the node does not exist.
-    pub fn exists(
-        self,
-        path: &str,
-    ) -> impl Future<Item = (Self, Option<Stat>), Error = failure::Error> {
-        self.exists_w(path, Watch::None)
+    pub async fn exists(self, path: &str) -> Result<(Self, Option<Stat>), failure::Error> {
+        self.exists_w(path, Watch::None).await
     }
 
-    fn get_children_w(
+    async fn get_children_w(
         self,
         path: &str,
         watch: Watch,
-    ) -> impl Future<Item = (Self, Option<Vec<String>>), Error = failure::Error> {
+    ) -> Result<(Self, Option<Vec<String>>), failure::Error> {
         trace!(self.logger, "get_children"; "path" => path, "watch" => ?watch);
         self.connection
             .enqueue(proto::Request::GetChildren {
                 path: path.to_string(),
                 watch,
             })
+            .await
             .and_then(transform::get_children)
             .map(move |r| (self, r))
     }
@@ -582,35 +586,36 @@ impl ZooKeeper {
     ///
     /// The returned list of children is not sorted and no guarantee is provided as to its natural
     /// or lexical order.
-    pub fn get_children(
+    pub async fn get_children(
         self,
         path: &str,
-    ) -> impl Future<Item = (Self, Option<Vec<String>>), Error = failure::Error> {
-        self.get_children_w(path, Watch::None)
+    ) -> Result<(Self, Option<Vec<String>>), failure::Error> {
+        self.get_children_w(path, Watch::None).await
     }
 
-    fn get_data_w(
+    async fn get_data_w(
         self,
         path: &str,
         watch: Watch,
-    ) -> impl Future<Item = (Self, Option<(Vec<u8>, Stat)>), Error = failure::Error> {
+    ) -> Result<(Self, Option<(Vec<u8>, Stat)>), failure::Error> {
         trace!(self.logger, "get_data"; "path" => path, "watch" => ?watch);
         self.connection
             .enqueue(proto::Request::GetData {
                 path: path.to_string(),
                 watch,
             })
+            .await
             .and_then(transform::get_data)
             .map(move |r| (self, r))
     }
 
     /// Return the data and the [`Stat`] of the node at the given `path`, or `None` if it does not
     /// exist.
-    pub fn get_data(
+    pub async fn get_data(
         self,
         path: &str,
-    ) -> impl Future<Item = (Self, Option<(Vec<u8>, Stat)>), Error = failure::Error> {
-        self.get_data_w(path, Watch::None)
+    ) -> Result<(Self, Option<(Vec<u8>, Stat)>), failure::Error> {
+        self.get_data_w(path, Watch::None).await
     }
 
     /// Start building a multi request. Multi requests batch several operations
@@ -635,11 +640,8 @@ impl WatchGlobally {
     /// If no errors occur, a watch is left on the node at the given `path`. The watch is triggered
     /// by any successful operation that creates or deletes the node, or sets the node's data. When
     /// the watch triggers, an event is sent to the global watcher stream.
-    pub fn exists(
-        self,
-        path: &str,
-    ) -> impl Future<Item = (ZooKeeper, Option<Stat>), Error = failure::Error> {
-        self.0.exists_w(path, Watch::Global)
+    pub async fn exists(self, path: &str) -> Result<(ZooKeeper, Option<Stat>), failure::Error> {
+        self.0.exists_w(path, Watch::Global).await
     }
 
     /// Return the names of the children of the node at the given `path`, or `None` if the node
@@ -652,11 +654,11 @@ impl WatchGlobally {
     /// by any successful operation that deletes the node at the given `path`, or creates or
     /// deletes a child of that node. When the watch triggers, an event is sent to the global
     /// watcher stream.
-    pub fn get_children(
+    pub async fn get_children(
         self,
         path: &str,
-    ) -> impl Future<Item = (ZooKeeper, Option<Vec<String>>), Error = failure::Error> {
-        self.0.get_children_w(path, Watch::Global)
+    ) -> Result<(ZooKeeper, Option<Vec<String>>), failure::Error> {
+        self.0.get_children_w(path, Watch::Global).await
     }
 
     /// Return the data and the [`Stat`] of the node at the given `path`, or `None` if it does not
@@ -665,11 +667,11 @@ impl WatchGlobally {
     /// If no errors occur, a watch is left on the node at the given `path`. The watch is triggered
     /// by any successful operation that sets the node's data, or deletes it. When the watch
     /// triggers, an event is sent to the global watcher stream.
-    pub fn get_data(
+    pub async fn get_data(
         self,
         path: &str,
-    ) -> impl Future<Item = (ZooKeeper, Option<(Vec<u8>, Stat)>), Error = failure::Error> {
-        self.0.get_data_w(path, Watch::Global)
+    ) -> Result<(ZooKeeper, Option<(Vec<u8>, Stat)>), failure::Error> {
+        self.0.get_data_w(path, Watch::Global).await
     }
 }
 
@@ -686,16 +688,14 @@ impl WithWatcher {
     /// If no errors occur, a watch will be left on the node at the given `path`. The watch is
     /// triggered by any successful operation that creates or deletes the node, or sets the data on
     /// the node, and in turn causes the included `oneshot::Receiver` to resolve.
-    pub fn exists(
+    pub async fn exists(
         self,
         path: &str,
-    ) -> impl Future<
-        Item = (ZooKeeper, oneshot::Receiver<WatchedEvent>, Option<Stat>),
-        Error = failure::Error,
-    > {
+    ) -> Result<(ZooKeeper, oneshot::Receiver<WatchedEvent>, Option<Stat>), failure::Error> {
         let (tx, rx) = oneshot::channel();
         self.0
             .exists_w(path, Watch::Custom(tx))
+            .await
             .map(|r| (r.0, rx, r.1))
     }
 
@@ -709,19 +709,20 @@ impl WithWatcher {
     /// by any successful operation that deletes the node at the given `path`, or creates or
     /// deletes a child of that node, and in turn causes the included `oneshot::Receiver` to
     /// resolve.
-    pub fn get_children(
+    pub async fn get_children(
         self,
         path: &str,
-    ) -> impl Future<
-        Item = (
+    ) -> Result<
+        (
             ZooKeeper,
             Option<(oneshot::Receiver<WatchedEvent>, Vec<String>)>,
         ),
-        Error = failure::Error,
+        failure::Error,
     > {
         let (tx, rx) = oneshot::channel();
         self.0
             .get_children_w(path, Watch::Custom(tx))
+            .await
             .map(|r| (r.0, r.1.map(move |c| (rx, c))))
     }
 
@@ -731,19 +732,20 @@ impl WithWatcher {
     /// If no errors occur, a watch is left on the node at the given `path`. The watch is triggered
     /// by any successful operation that sets the node's data, or deletes it, and in turn causes
     /// the included `oneshot::Receiver` to resolve.
-    pub fn get_data(
+    pub async fn get_data(
         self,
         path: &str,
-    ) -> impl Future<
-        Item = (
+    ) -> Result<
+        (
             ZooKeeper,
             Option<(oneshot::Receiver<WatchedEvent>, Vec<u8>, Stat)>,
         ),
-        Error = failure::Error,
+        failure::Error,
     > {
         let (tx, rx) = oneshot::channel();
         self.0
             .get_data_w(path, Watch::Custom(tx))
+            .await
             .map(|r| (r.0, r.1.map(move |(b, s)| (rx, b, s))))
     }
 }
@@ -812,14 +814,14 @@ impl MultiBuilder {
     }
 
     /// Run executes the attached requests in one atomic unit.
-    pub fn run(
+    pub async fn run(
         self,
-    ) -> impl Future<Item = (ZooKeeper, Vec<Result<MultiResponse, error::Multi>>), Error = failure::Error>
-    {
+    ) -> Result<(ZooKeeper, Vec<Result<MultiResponse, error::Multi>>), failure::Error> {
         let (zk, requests) = (self.zk, self.requests);
         let reqs_lite: Vec<transform::RequestMarker> = requests.iter().map(|r| r.into()).collect();
         zk.connection
             .enqueue(proto::Request::Multi(requests))
+            .await
             .and_then(move |r| match r {
                 Ok(proto::Response::Multi(responses)) => reqs_lite
                     .iter()
@@ -835,13 +837,19 @@ impl MultiBuilder {
 
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
+
     use super::*;
 
+    use futures::{FutureExt, StreamExt};
     use slog::Drain;
 
     #[test]
     fn it_works() {
-        let mut rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let mut builder = ZooKeeperBuilder::default();
         let decorator = slog_term::TermDecorator::new().build();
         let drain = slog_term::FullFormat::new(decorator).build().fuse();
@@ -855,13 +863,13 @@ mod tests {
                     .and_then(|(zk, w)| {
                         zk.with_watcher()
                             .exists("/foo")
-                            .inspect(|(_, _, stat)| assert_eq!(stat, &None))
+                            .inspect_ok(|(_, _, stat)| assert_eq!(stat, &None))
                             .and_then(|(zk, exists_w, _)| {
                                 zk.watch()
                                     .exists("/foo")
-                                    .map(move |(zk, x)| (zk, x, exists_w))
+                                    .map_ok(move |(zk, x)| (zk, x, exists_w))
                             })
-                            .inspect(|(_, stat, _)| assert_eq!(stat, &None))
+                            .inspect_ok(|(_, stat, _)| assert_eq!(stat, &None))
                             .and_then(|(zk, _, exists_w)| {
                                 zk.create(
                                     "/foo",
@@ -869,17 +877,17 @@ mod tests {
                                     Acl::open_unsafe(),
                                     CreateMode::Persistent,
                                 )
-                                .map(move |(zk, x)| (zk, x, exists_w))
+                                .map_ok(move |(zk, x)| (zk, x, exists_w))
                             })
-                            .inspect(|(_, ref path, _)| {
+                            .inspect_ok(|(_, ref path, _)| {
                                 assert_eq!(path.as_ref().map(String::as_str), Ok("/foo"))
                             })
                             .and_then(move |(zk, _, exists_w)| {
                                 exists_w
-                                    .map(move |w| (zk, w))
+                                    .map_ok(move |w| (zk, w))
                                     .map_err(|e| format_err!("exists_w failed: {:?}", e))
                             })
-                            .inspect(|(_, event)| {
+                            .inspect_ok(|(_, event)| {
                                 assert_eq!(
                                     event,
                                     &WatchedEvent {
@@ -890,16 +898,16 @@ mod tests {
                                 );
                             })
                             .and_then(|(zk, _)| zk.watch().exists("/foo"))
-                            .inspect(|(_, stat)| {
+                            .inspect_ok(|(_, stat)| {
                                 assert_eq!(stat.unwrap().data_length as usize, b"Hello world".len())
                             })
                             .and_then(|(zk, _)| zk.get_acl("/foo"))
-                            .inspect(|(_, res)| {
+                            .inspect_ok(|(_, res)| {
                                 let res = res.as_ref().unwrap();
                                 assert_eq!(res.0, Acl::open_unsafe())
                             })
                             .and_then(|(zk, _)| zk.get_data("/foo"))
-                            .inspect(|(_, res)| {
+                            .inspect_ok(|(_, res)| {
                                 let data = b"Hello world";
                                 let res = res.as_ref().unwrap();
                                 assert_eq!(res.0, data);
@@ -908,11 +916,11 @@ mod tests {
                             .and_then(|(zk, res)| {
                                 zk.set_data("/foo", Some(res.unwrap().1.version), &b"Bye world"[..])
                             })
-                            .inspect(|(_, stat)| {
+                            .inspect_ok(|(_, stat)| {
                                 assert_eq!(stat.unwrap().data_length as usize, "Bye world".len());
                             })
                             .and_then(|(zk, _)| zk.get_data("/foo"))
-                            .inspect(|(_, res)| {
+                            .inspect_ok(|(_, res)| {
                                 let data = b"Bye world";
                                 let res = res.as_ref().unwrap();
                                 assert_eq!(res.0, data);
@@ -926,15 +934,15 @@ mod tests {
                                     CreateMode::Persistent,
                                 )
                             })
-                            .inspect(|(_, ref path)| {
+                            .inspect_ok(|(_, ref path)| {
                                 assert_eq!(path.as_ref().map(String::as_str), Ok("/foo/bar"))
                             })
                             .and_then(|(zk, _)| zk.get_children("/foo"))
-                            .inspect(|(_, children)| {
+                            .inspect_ok(|(_, children)| {
                                 assert_eq!(children, &Some(vec!["bar".to_string()]));
                             })
                             .and_then(|(zk, _)| zk.get_data("/foo/bar"))
-                            .inspect(|(_, res)| {
+                            .inspect_ok(|(_, res)| {
                                 let data = b"Hello bar";
                                 let res = res.as_ref().unwrap();
                                 assert_eq!(res.0, data);
@@ -945,19 +953,18 @@ mod tests {
                                 zk.watch().exists("/foo")
                             })
                             .and_then(|(zk, _)| zk.delete("/foo", None))
-                            .inspect(|(_, res)| assert_eq!(res, &Err(error::Delete::NotEmpty)))
+                            .inspect_ok(|(_, res)| assert_eq!(res, &Err(error::Delete::NotEmpty)))
                             .and_then(|(zk, _)| zk.delete("/foo/bar", None))
-                            .inspect(|(_, res)| assert_eq!(res, &Ok(())))
+                            .inspect_ok(|(_, res)| assert_eq!(res, &Ok(())))
                             .and_then(|(zk, _)| zk.delete("/foo", None))
-                            .inspect(|(_, res)| assert_eq!(res, &Ok(())))
+                            .inspect_ok(|(_, res)| assert_eq!(res, &Ok(())))
                             .and_then(|(zk, _)| zk.watch().exists("/foo"))
-                            .inspect(|(_, stat)| assert_eq!(stat, &None))
+                            .inspect_ok(|(_, stat)| assert_eq!(stat, &None))
                             .and_then(move |(zk, _)| {
-                                w.into_future()
-                                    .map(move |x| (zk, x))
-                                    .map_err(|e| format_err!("stream error: {:?}", e.0))
+                                w.into_future().map(move |x| (zk, x)).map(Ok)
+                                // .map_err(|e| format_err!("stream error: {:?}", e.0))
                             })
-                            .inspect(|(_, (event, _))| {
+                            .inspect_ok(|(_, (event, _))| {
                                 assert_eq!(
                                     event,
                                     &Some(WatchedEvent {
@@ -968,9 +975,8 @@ mod tests {
                                 );
                             })
                             .and_then(|(zk, (_, w))| {
-                                w.into_future()
-                                    .map(move |x| (zk, x))
-                                    .map_err(|e| format_err!("stream error: {:?}", e.0))
+                                w.into_future().map(move |x| (zk, x)).map(Ok)
+                                // .map_err(|e| format_err!("stream error: {:?}", e.0))
                             })
                             .and_then(|(zk, (event, w))| {
                                 assert_eq!(
@@ -982,11 +988,10 @@ mod tests {
                                     })
                                 );
 
-                                w.into_future()
-                                    .map(move |x| (zk, x))
-                                    .map_err(|e| format_err!("stream error: {:?}", e.0))
+                                w.into_future().map(move |x| (zk, x)).map(Ok)
+                                // .map_err(|e| format_err!("stream error: {:?}", e.0))
                             })
-                            .inspect(|(_, (event, _))| {
+                            .inspect_ok(|(_, (event, _))| {
                                 assert_eq!(
                                     event,
                                     &Some(WatchedEvent {
@@ -996,19 +1001,21 @@ mod tests {
                                     })
                                 );
                             })
-                            .map(|(zk, (_, w))| (zk, w))
+                            .map_ok(|(zk, (_, w))| (zk, w))
                     }),
             )
             .unwrap();
 
         drop(zk); // make Packetizer idle
-        rt.shutdown_on_idle().wait().unwrap();
-        assert_eq!(w.wait().count(), 0);
+        drop(rt);
+        // rt.shutdown_on_idle().wait().unwrap();
+        assert_eq!(futures::executor::block_on(w.count()), 0);
     }
 
     #[test]
     fn example() {
         tokio::runtime::Builder::new_current_thread()
+            .enable_all()
             .build()
             .unwrap()
             .block_on(
@@ -1018,7 +1025,7 @@ mod tests {
                         // the next time the "exists" status of /example changes after the call.
                         zk.watch()
                             .exists("/example")
-                            .inspect(|(_, stat)| {
+                            .inspect_ok(|(_, stat)| {
                                 // initially, /example does not exist
                                 assert_eq!(stat, &None)
                             })
@@ -1031,14 +1038,14 @@ mod tests {
                                     CreateMode::Persistent,
                                 )
                             })
-                            .inspect(|(_, ref path)| {
+                            .inspect_ok(|(_, ref path)| {
                                 assert_eq!(path.as_ref().map(String::as_str), Ok("/example"))
                             })
                             .and_then(|(zk, _)| {
                                 // does it exist now?
                                 zk.watch().exists("/example")
                             })
-                            .inspect(|(_, stat)| {
+                            .inspect_ok(|(_, stat)| {
                                 // looks like it!
                                 // note that the creation above also triggered our "exists" watch!
                                 assert_eq!(stat.unwrap().data_length as usize, b"Hello world".len())
@@ -1047,7 +1054,7 @@ mod tests {
                                 // did the data get set correctly?
                                 zk.get_data("/example")
                             })
-                            .inspect(|(_, res)| {
+                            .inspect_ok(|(_, res)| {
                                 let data = b"Hello world";
                                 let res = res.as_ref().unwrap();
                                 assert_eq!(res.0, data);
@@ -1061,7 +1068,7 @@ mod tests {
                                     &b"Bye world"[..],
                                 )
                             })
-                            .inspect(|(_, stat)| {
+                            .inspect_ok(|(_, stat)| {
                                 assert_eq!(stat.unwrap().data_length as usize, "Bye world".len());
                             })
                             .and_then(|(zk, _)| {
@@ -1073,42 +1080,40 @@ mod tests {
                                     CreateMode::Persistent,
                                 )
                             })
-                            .inspect(|(_, ref path)| {
+                            .inspect_ok(|(_, ref path)| {
                                 assert_eq!(path.as_ref().map(String::as_str), Ok("/example/more"))
                             })
                             .and_then(|(zk, _)| {
                                 // it should be visible as a child of /example
                                 zk.get_children("/example")
                             })
-                            .inspect(|(_, children)| {
+                            .inspect_ok(|(_, children)| {
                                 assert_eq!(children, &Some(vec!["more".to_string()]));
                             })
                             .and_then(|(zk, _)| {
                                 // it is not legal to delete a node that has children directly
                                 zk.delete("/example", None)
                             })
-                            .inspect(|(_, res)| assert_eq!(res, &Err(error::Delete::NotEmpty)))
+                            .inspect_ok(|(_, res)| assert_eq!(res, &Err(error::Delete::NotEmpty)))
                             .and_then(|(zk, _)| {
                                 // instead we must delete the children first
                                 zk.delete("/example/more", None)
                             })
-                            .inspect(|(_, res)| assert_eq!(res, &Ok(())))
+                            .inspect_ok(|(_, res)| assert_eq!(res, &Ok(())))
                             .and_then(|(zk, _)| zk.delete("/example", None))
-                            .inspect(|(_, res)| assert_eq!(res, &Ok(())))
+                            .inspect_ok(|(_, res)| assert_eq!(res, &Ok(())))
                             .and_then(|(zk, _)| {
                                 // no /example should no longer exist!
                                 zk.exists("/example")
                             })
-                            .inspect(|(_, stat)| assert_eq!(stat, &None))
+                            .inspect_ok(|(_, stat)| assert_eq!(stat, &None))
                             .and_then(move |(zk, _)| {
                                 // now let's check that the .watch().exists we did in the very
                                 // beginning actually triggered!
-                                default_watcher
-                                    .into_future()
-                                    .map(move |x| (zk, x))
-                                    .map_err(|e| format_err!("stream error: {:?}", e.0))
+                                default_watcher.into_future().map(move |x| (zk, x)).map(Ok)
+                                // .map_err(|e| format_err!("stream error: {:?}", e.0))
                             })
-                            .inspect(|(_, (event, _))| {
+                            .inspect_ok(|(_, (event, _))| {
                                 assert_eq!(
                                     event,
                                     &Some(WatchedEvent {
@@ -1119,14 +1124,18 @@ mod tests {
                                 );
                             })
                     })
-                    .map(|_| ())
+                    .map_ok(|_| ())
                     .map_err(|e| panic!("{:?}", e)),
-            );
+            )
+            .unwrap();
     }
 
     #[test]
     fn acl_test() {
-        let mut rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let mut builder = ZooKeeperBuilder::default();
         let decorator = slog_term::TermDecorator::new().build();
         let drain = slog_term::FullFormat::new(decorator).build().fuse();
@@ -1145,7 +1154,7 @@ mod tests {
                             CreateMode::Ephemeral,
                         )
                         .and_then(|(zk, _)| zk.get_acl("/acl_test"))
-                        .inspect(|(_, res)| {
+                        .inspect_ok(|(_, res)| {
                             let res = res.as_ref().unwrap();
                             assert_eq!(res.0, Acl::open_unsafe())
                         })
@@ -1156,27 +1165,27 @@ mod tests {
                                 Some(res.unwrap().1.version),
                             )
                         })
-                        .inspect(|(_, res)| {
+                        .inspect_ok(|(_, res)| {
                             // a not authenticated user is not able to set `auth` scheme acls.
                             assert_eq!(res, &Err(error::SetAcl::InvalidAcl))
                         })
                         .and_then(|(zk, _)| zk.set_acl("/acl_test", Acl::read_unsafe(), None))
-                        .inspect(|(_, stat)| {
+                        .inspect_ok(|(_, stat)| {
                             // successfully change node acl to `read_unsafe`
                             assert_eq!(stat.unwrap().data_length as usize, b"foo".len())
                         })
                         .and_then(|(zk, _)| zk.get_acl("/acl_test"))
-                        .inspect(|(_, res)| {
+                        .inspect_ok(|(_, res)| {
                             let res = res.as_ref().unwrap();
                             assert_eq!(res.0, Acl::read_unsafe())
                         })
                         .and_then(|(zk, _)| zk.set_data("/acl_test", None, &b"bar"[..]))
-                        .inspect(|(_, res)| {
+                        .inspect_ok(|(_, res)| {
                             // cannot set data on a read only node
                             assert_eq!(res, &Err(error::SetData::NoAuth))
                         })
                         .and_then(|(zk, _)| zk.set_acl("/acl_test", Acl::open_unsafe(), None))
-                        .inspect(|(_, res)| {
+                        .inspect_ok(|(_, res)| {
                             // cannot change a read only node's acl
                             assert_eq!(res, &Err(error::SetAcl::NoAuth))
                         })
@@ -1185,12 +1194,16 @@ mod tests {
             .unwrap();
 
         drop(zk); // make Packetizer idle
-        rt.shutdown_on_idle().wait().unwrap();
+        drop(rt);
+        // rt.shutdown_on_idle().wait().unwrap();
     }
 
     #[test]
     fn multi_test() {
-        let mut rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let mut builder = ZooKeeperBuilder::default();
         let decorator = slog_term::TermDecorator::new().build();
         let drain = slog_term::FullFormat::new(decorator).build().fuse();
@@ -1198,12 +1211,15 @@ mod tests {
         builder.set_logger(slog::Logger::root(drain, o!()));
 
         let check_exists = |zk: ZooKeeper, paths: &'static [&'static str]| {
-            let mut fut: Box<
-                dyn futures::Future<Item = (ZooKeeper, Vec<bool>), Error = failure::Error> + Send,
-            > = Box::new(futures::future::ok((zk, Vec::new())));
+            let mut fut: Pin<
+                Box<
+                    dyn futures::Future<Output = Result<(ZooKeeper, Vec<bool>), failure::Error>>
+                        + Send,
+                >,
+            > = Box::pin(futures::future::ok((zk, Vec::new())));
             for p in paths {
-                fut = Box::new(fut.and_then(move |(zk, mut v)| {
-                    zk.exists(p).map(|(zk, stat)| {
+                fut = Box::pin(fut.and_then(move |(zk, mut v)| {
+                    zk.exists(p).map_ok(|(zk, stat)| {
                         v.push(stat.is_some());
                         (zk, v)
                     })
@@ -1222,7 +1238,7 @@ mod tests {
                             .create("/c", &b"b"[..], Acl::open_unsafe(), CreateMode::Persistent)
                             .run()
                     })
-                    .inspect(|(_, res)| {
+                    .inspect_ok(|(_, res)| {
                         assert_eq!(
                             res,
                             &[
@@ -1232,7 +1248,7 @@ mod tests {
                         )
                     })
                     .and_then(move |(zk, _)| check_exists(zk, &["/a", "/b", "/c", "/d"]))
-                    .inspect(|(_, res)| assert_eq!(res, &[false, true, true, false]))
+                    .inspect_ok(|(_, res)| assert_eq!(res, &[false, true, true, false]))
                     .and_then(|(zk, _)| {
                         zk.multi()
                             .create("/a", &b"a"[..], Acl::open_unsafe(), CreateMode::Persistent)
@@ -1241,7 +1257,7 @@ mod tests {
                             .create("/d", &b"a"[..], Acl::open_unsafe(), CreateMode::Persistent)
                             .run()
                     })
-                    .inspect(|(_, res)| {
+                    .inspect_ok(|(_, res)| {
                         assert_eq!(
                             res,
                             &[
@@ -1253,16 +1269,16 @@ mod tests {
                         )
                     })
                     .and_then(move |(zk, _)| check_exists(zk, &["/a", "/b", "/c", "/d"]))
-                    .inspect(|(_, res)| assert_eq!(res, &[false, true, true, false]))
+                    .inspect_ok(|(_, res)| assert_eq!(res, &[false, true, true, false]))
                     .and_then(|(zk, _)| zk.multi().set_data("/b", None, &b"garbaggio"[..]).run())
-                    .inspect(|(_, res)| match res[0] {
+                    .inspect_ok(|(_, res)| match res[0] {
                         Ok(MultiResponse::SetData(stat)) => {
                             assert_eq!(stat.data_length as usize, "garbaggio".len())
                         }
                         _ => panic!("unexpected response: {:?}", res),
                     })
                     .and_then(|(zk, _)| zk.multi().check("/b", 0).delete("/c", None).run())
-                    .inspect(|(_, res)| {
+                    .inspect_ok(|(_, res)| {
                         assert_eq!(
                             res,
                             &[
@@ -1274,9 +1290,9 @@ mod tests {
                         )
                     })
                     .and_then(move |(zk, _)| check_exists(zk, &["/a", "/b", "/c", "/d"]))
-                    .inspect(|(_, res)| assert_eq!(res, &[false, true, true, false]))
+                    .inspect_ok(|(_, res)| assert_eq!(res, &[false, true, true, false]))
                     .and_then(|(zk, _)| zk.multi().check("/a", 0).run())
-                    .inspect(|(_, res)| {
+                    .inspect_ok(|(_, res)| {
                         assert_eq!(res, &[Err(error::Multi::Check(error::Check::NoNode)),])
                     })
                     .and_then(|(zk, _)| {
@@ -1287,7 +1303,7 @@ mod tests {
                             .delete("/c", None)
                             .run()
                     })
-                    .inspect(|(_, res)| {
+                    .inspect_ok(|(_, res)| {
                         assert_eq!(
                             res,
                             &[
@@ -1299,11 +1315,11 @@ mod tests {
                         )
                     })
                     .and_then(move |(zk, _)| check_exists(zk, &["/a", "/b", "/c", "/d"]))
-                    .inspect(|(_, res)| assert_eq!(res, &[false, false, false, false])),
+                    .inspect_ok(|(_, res)| assert_eq!(res, &[false, false, false, false])),
             )
             .unwrap();
 
         drop(zk); // make Packetizer idle
-        rt.shutdown_on_idle().wait().unwrap();
+        drop(rt);
     }
 }

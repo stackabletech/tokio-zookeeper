@@ -16,17 +16,17 @@ pub(crate) use self::response::Response;
 pub(crate) use self::watch::Watch;
 
 #[async_trait]
-pub trait ZooKeeperTransport: AsyncRead + AsyncWrite + Sized + Send {
-    type Addr: Send;
-    type ConnectError: Into<failure::Error>;
-    async fn connect(addr: &Self::Addr) -> Result<Self, Self::ConnectError>;
+pub trait ZooKeeperTransport: AsyncRead + AsyncWrite + Sized + Send + 'static {
+    type Addr: Send + Clone;
+    type ConnectError: Into<failure::Error> + 'static;
+    async fn connect(addr: Self::Addr) -> Result<Self, Self::ConnectError>;
 }
 
 #[async_trait]
 impl ZooKeeperTransport for tokio::net::TcpStream {
     type Addr = SocketAddr;
     type ConnectError = tokio::io::Error;
-    async fn connect(addr: &Self::Addr) -> Result<Self, Self::ConnectError> {
+    async fn connect(addr: Self::Addr) -> Result<Self, Self::ConnectError> {
         tokio::net::TcpStream::connect(addr).await
     }
 }

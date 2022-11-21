@@ -1,19 +1,24 @@
 use super::{request, watch::WatchType, Request, Response};
 use crate::{WatchedEvent, WatchedEventType, ZkError};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use failure::bail;
+use failure::format_err;
 use futures::channel::{mpsc, oneshot};
 use slog::{debug, info, trace};
 use std::collections::HashMap;
-use std::task::ready;
-use std::{mem, task::Poll, time};
-use tokio::io::{AsyncRead, AsyncWrite};
+use std::{
+    future::Future,
+    mem,
+    pin::Pin,
+    task::{ready, Context, Poll},
+    time,
+};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 pub(super) struct ActivePacketizer<S> {
-    stream: S,
+    stream: Pin<Box<S>>,
 
     /// Heartbeat timer,
-    timer: tokio::time::Sleep,
+    timer: Pin<Box<tokio::time::Sleep>>,
     timeout: time::Duration,
 
     /// Bytes we have not yet set.
@@ -51,8 +56,8 @@ where
 {
     pub(super) fn new(stream: S) -> Self {
         ActivePacketizer {
-            stream,
-            timer: tokio::time::sleep(time::Duration::from_secs(86_400)),
+            stream: Box::pin(stream),
+            timer: Box::pin(tokio::time::sleep(time::Duration::from_secs(86_400))),
             timeout: time::Duration::new(86_400, 0),
             outbox: Vec::new(),
             outstart: 0,
@@ -118,6 +123,7 @@ where
 
     fn poll_write(
         &mut self,
+        cx: &mut Context,
         exiting: bool,
         logger: &mut slog::Logger,
     ) -> Poll<Result<(), failure::Error>>
@@ -126,7 +132,10 @@ where
     {
         let mut wrote = false;
         while self.outlen() != 0 {
-            let n = ready!(self.stream.poll_write(&self.outbox[self.outstart..])?);
+            let n = ready!(self
+                .stream
+                .as_mut()
+                .poll_write(cx, &self.outbox[self.outstart..])?);
             wrote = true;
             self.outstart += n;
             if self.outstart == self.outbox.len() {
@@ -138,21 +147,28 @@ where
         if wrote {
             // heartbeat is since last write traffic!
             trace!(logger, "resetting heartbeat timer");
-            self.timer.reset(time::Instant::now() + self.timeout);
+            self.timer
+                .as_mut()
+                .reset(tokio::time::Instant::now() + self.timeout);
         }
 
-        self.stream.poll_flush().map_err(failure::Error::from)?;
+        ready!(self
+            .stream
+            .as_mut()
+            .poll_flush(cx)
+            .map_err(failure::Error::from)?);
 
         if exiting {
             debug!(logger, "shutting down writer");
-            ready!(self.stream.shutdown()?);
+            ready!(self.stream.as_mut().poll_shutdown(cx)?);
         }
 
-        Ok(Poll::Ready(()))
+        Poll::Ready(Ok(()))
     }
 
     fn poll_read(
         &mut self,
+        cx: &mut Context,
         default_watcher: &mut mpsc::UnboundedSender<WatchedEvent>,
         logger: &mut slog::Logger,
     ) -> Poll<Result<(), failure::Error>>
@@ -171,20 +187,22 @@ where
             while self.inlen() < need {
                 let read_from = self.inbox.len();
                 self.inbox.resize(self.instart + need, 0);
-                match self.stream.poll_read(&mut self.inbox[read_from..])? {
-                    Poll::Ready(n) => {
+                let mut inbox_buf = ReadBuf::new(&mut self.inbox[read_from..]);
+                match self.stream.as_mut().poll_read(cx, &mut inbox_buf)? {
+                    Poll::Ready(()) => {
+                        let n = inbox_buf.filled().len();
                         self.inbox.truncate(read_from + n);
                         if n == 0 {
                             if self.inlen() != 0 {
-                                bail!(
+                                return Poll::Ready(Err(format_err!(
                                     "connection closed with {} bytes left in buffer: {:x?}",
                                     self.inlen(),
                                     &self.inbox[self.instart..]
-                                );
+                                )));
                             } else {
                                 // Server closed session with no bytes left in buffer
                                 debug!(logger, "server closed connection");
-                                return Ok(Poll::Ready(()));
+                                return Poll::Ready(Ok(()));
                             }
                         }
 
@@ -197,7 +215,7 @@ where
                     }
                     Poll::Pending => {
                         self.inbox.truncate(read_from);
-                        return Ok(Poll::Pending);
+                        return Poll::Pending;
                     }
                 }
             }
@@ -235,7 +253,7 @@ where
                     // XXX: in theory, server should now shut down receive end
                     trace!(logger, "got response to CloseSession");
                     if let Some(e) = err {
-                        bail!("failed to close session: {:?}", e);
+                        return Poll::Ready(Err(format_err!("failed to close session: {:?}", e)));
                     }
                 } else if xid == -1 {
                     // watch event
@@ -290,7 +308,7 @@ where
                     // response to ping -- empty response
                     trace!(logger, "got response to heartbeat");
                     if let Some(e) = err {
-                        bail!("bad response to ping: {:?}", e);
+                        return Poll::Ready(Err(format_err!("bad response to ping: {:?}", e)));
                     }
                 } else {
                     // response to user request
@@ -343,7 +361,9 @@ where
                             trace!(logger, "negotiated session timeout: {}ms", timeout);
 
                             self.timeout = time::Duration::from_millis(2 * timeout as u64 / 3);
-                            self.timer.reset(time::Instant::now() + self.timeout);
+                            self.timer
+                                .as_mut()
+                                .reset(tokio::time::Instant::now() + self.timeout);
 
                             // keep track of these for consistent re-connect
                             self.session_id = session_id;
@@ -364,14 +384,15 @@ where
 
     pub(super) fn poll(
         &mut self,
+        cx: &mut Context,
         exiting: bool,
         logger: &mut slog::Logger,
         default_watcher: &mut mpsc::UnboundedSender<WatchedEvent>,
     ) -> Poll<Result<(), failure::Error>> {
         trace!(logger, "poll_read");
-        let r = self.poll_read(default_watcher, logger)?;
+        let r = self.poll_read(cx, default_watcher, logger)?;
 
-        if let Poll::Ready(()) = self.timer.poll()? {
+        if let Poll::Ready(()) = self.timer.as_mut().poll(cx) {
             if self.outbox.is_empty() {
                 // send a ping!
                 // length is known for pings
@@ -391,22 +412,26 @@ where
                 // already request in flight, so no need to also send heartbeat
             }
 
-            self.timer.reset(time::Instant::now() + self.timeout);
+            self.timer
+                .as_mut()
+                .reset(tokio::time::Instant::now() + self.timeout);
         }
 
         trace!(logger, "poll_read");
-        let w = self.poll_write(exiting, logger)?;
+        let w = self.poll_write(cx, exiting, logger)?;
 
         match (r, w) {
             (Poll::Ready(()), Poll::Ready(())) if exiting => {
                 debug!(logger, "packetizer done");
-                Ok(Poll::Ready(()))
+                Poll::Ready(Ok(()))
             }
-            (Poll::Ready(()), Poll::Ready(())) => {
-                bail!("Not exiting, but server closed connection")
-            }
-            (Poll::Ready(()), _) => bail!("outstanding requests, but response channel closed"),
-            _ => Ok(Poll::Pending),
+            (Poll::Ready(()), Poll::Ready(())) => Poll::Ready(Err(format_err!(
+                "Not exiting, but server closed connection"
+            ))),
+            (Poll::Ready(()), _) => Poll::Ready(Err(format_err!(
+                "outstanding requests, but response channel closed"
+            ))),
+            _ => Poll::Pending,
         }
     }
 }
