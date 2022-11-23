@@ -8,7 +8,7 @@ use failure::format_err;
 use futures::{
     channel::{mpsc, oneshot},
     future::Either,
-    FutureExt, StreamExt, TryFutureExt,
+    ready, FutureExt, StreamExt, TryFutureExt,
 };
 use pin_project::pin_project;
 use slog::{debug, error, info, trace};
@@ -16,7 +16,7 @@ use std::{
     future::{self, Future},
     mem,
     pin::Pin,
-    task::{ready, Context, Poll},
+    task::{Context, Poll},
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 

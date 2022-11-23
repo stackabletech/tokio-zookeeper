@@ -2,7 +2,10 @@ use super::{request, watch::WatchType, Request, Response};
 use crate::{WatchedEvent, WatchedEventType, ZkError};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use failure::format_err;
-use futures::channel::{mpsc, oneshot};
+use futures::{
+    channel::{mpsc, oneshot},
+    ready,
+};
 use pin_project::pin_project;
 use slog::{debug, info, trace};
 use std::collections::HashMap;
@@ -10,7 +13,7 @@ use std::{
     future::Future,
     mem,
     pin::Pin,
-    task::{ready, Context, Poll},
+    task::{Context, Poll},
     time,
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
