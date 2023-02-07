@@ -262,10 +262,8 @@ impl Default for ZooKeeperBuilder {
 impl ZooKeeperBuilder {
     /// Connect to a ZooKeeper server instance at the given address.
     ///
-    /// Session establishment is asynchronous. This constructor will initiate connection to the
-    /// server and return immediately - potentially (usually) before the session is fully
-    /// established. When the session is established, a `ZooKeeper` instance is returned, along
-    /// with a "watcher" that will provide notifications of any changes in state.
+    /// A `ZooKeeper` instance is returned, along with a "watcher" that will provide notifications
+    /// of any changes in state.
     ///
     /// If the connection to the server fails, the client will automatically try to re-connect.
     /// Only if re-connection fails is an error returned to the client. Requests that are in-flight
@@ -275,10 +273,9 @@ impl ZooKeeperBuilder {
         addr: &SocketAddr,
     ) -> Result<(ZooKeeper, impl Stream<Item = WatchedEvent>), failure::Error> {
         let (tx, rx) = futures::channel::mpsc::unbounded();
-        let addr = *addr;
-        tokio::net::TcpStream::connect(&addr)
+        tokio::net::TcpStream::connect(addr)
             .map_err(failure::Error::from)
-            .and_then(move |stream| self.handshake(addr, stream, tx))
+            .and_then(move |stream| self.handshake(*addr, stream, tx))
             .map_ok(move |zk| (zk, rx))
             .await
     }
