@@ -50,6 +50,8 @@ impl<S> Packetizer<S>
 where
     S: ZooKeeperTransport,
 {
+    // Enqueuer is the entry point for submitting data to Packetizer
+    #[allow(clippy::new_ret_no_self)]
     pub(crate) fn new(
         addr: S::Addr,
         stream: S,

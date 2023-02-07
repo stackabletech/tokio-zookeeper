@@ -1103,7 +1103,7 @@ mod tests {
             Ok(MultiResponse::SetData(stat)) => {
                 assert_eq!(stat.data_length as usize, "garbaggio".len())
             }
-            _ => panic!("unexpected response: {:?}", res),
+            _ => panic!("unexpected response: {res:?}"),
         }
 
         let res = zk

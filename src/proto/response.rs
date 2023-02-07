@@ -188,7 +188,7 @@ impl Response {
                 }
                 Ok(Response::Multi(responses))
             }
-            _ => panic!("got unexpected response opcode {:?}", opcode),
+            _ => panic!("got unexpected response opcode {opcode:?}"),
         }
     }
 }

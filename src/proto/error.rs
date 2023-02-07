@@ -83,7 +83,7 @@ impl From<i32> for ZkError {
             -118 => ZkError::SessionMoved,
             -1 => ZkError::SystemError,
             -6 => ZkError::Unimplemented,
-            _ => panic!("unknown error code {}", code),
+            _ => panic!("unknown error code {code}"),
         }
     }
 }
