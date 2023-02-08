@@ -13,7 +13,7 @@ jobs:
       - name: Check out repository code
         uses: actions/checkout@v3
       - run: rustup default ${{ matrix.rust }}
-      - run: wget -O zookeeper.tar.gz http://archive.apache.org/dist/zookeeper/zookeeper-${{ matrix.zookeeper }}}/zookeeper-${{ matrix.zookeeper }}.tar.gz
+      - run: wget -O zookeeper.tar.gz http://archive.apache.org/dist/zookeeper/zookeeper-${{ matrix.zookeeper }}/zookeeper-${{ matrix.zookeeper }}.tar.gz
       - run: mkdir zookeeper
       - run: tar -zxvf zookeeper.tar.gz -C zookeeper --strip-components 1
       - run: ./travis/before_script.sh
