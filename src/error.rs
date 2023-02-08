@@ -1,3 +1,5 @@
+use failure::Fail;
+
 /// Errors that may cause a delete request to fail.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Fail)]
 pub enum Delete {

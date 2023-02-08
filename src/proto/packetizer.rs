@@ -2,18 +2,25 @@ use super::{
     active_packetizer::ActivePacketizer, request, watch::WatchType, Request, Response,
     ZooKeeperTransport,
 };
+use crate::{Watch, WatchedEvent, ZkError};
 use byteorder::{BigEndian, WriteBytesExt};
-use failure;
+use failure::format_err;
 use futures::{
+    channel::{mpsc, oneshot},
     future::Either,
-    sync::{mpsc, oneshot},
+    ready, FutureExt, StreamExt, TryFutureExt,
 };
-use slog;
-use std::mem;
-use tokio;
-use tokio::prelude::*;
-use {Watch, WatchedEvent, ZkError};
+use pin_project::pin_project;
+use slog::{debug, error, info, trace};
+use std::{
+    future::{self, Future},
+    mem,
+    pin::Pin,
+    task::{Context, Poll},
+};
+use tokio::io::{AsyncRead, AsyncWrite};
 
+#[pin_project]
 pub(crate) struct Packetizer<S>
 where
     S: ZooKeeperTransport,
@@ -22,6 +29,7 @@ where
     addr: S::Addr,
 
     /// Current state
+    #[pin]
     state: PacketizerState<S>,
 
     /// Watcher to send watch events to.
@@ -42,6 +50,8 @@ impl<S> Packetizer<S>
 where
     S: ZooKeeperTransport,
 {
+    // Enqueuer is the entry point for submitting data to Packetizer
+    #[allow(clippy::new_ret_no_self)]
     pub(crate) fn new(
         addr: S::Addr,
         stream: S,
@@ -60,10 +70,11 @@ where
                 state: PacketizerState::Connected(ActivePacketizer::new(stream)),
                 xid: 0,
                 default_watcher,
-                rx: rx,
+                rx,
                 logger: log,
                 exiting: false,
-            }.map_err(move |e| {
+            }
+            .map_err(move |e| {
                 error!(exitlogger, "packetizer exiting: {:?}", e);
                 drop(e);
             }),
@@ -73,9 +84,12 @@ where
     }
 }
 
+#[pin_project(project = PacketizerStateProj)]
 enum PacketizerState<S> {
-    Connected(ActivePacketizer<S>),
-    Reconnecting(Box<Future<Item = ActivePacketizer<S>, Error = failure::Error> + Send + 'static>),
+    Connected(#[pin] ActivePacketizer<S>),
+    Reconnecting(
+        Pin<Box<dyn Future<Output = Result<ActivePacketizer<S>, failure::Error>> + Send + 'static>>,
+    ),
 }
 
 impl<S> PacketizerState<S>
@@ -83,21 +97,22 @@ where
     S: AsyncRead + AsyncWrite,
 {
     fn poll(
-        &mut self,
+        mut self: Pin<&mut Self>,
+        cx: &mut Context,
         exiting: bool,
         logger: &mut slog::Logger,
         default_watcher: &mut mpsc::UnboundedSender<WatchedEvent>,
-    ) -> Result<Async<()>, failure::Error> {
-        let ap = match *self {
-            PacketizerState::Connected(ref mut ap) => {
-                return ap.poll(exiting, logger, default_watcher)
+    ) -> Poll<Result<(), failure::Error>> {
+        let ap = match self.as_mut().project() {
+            PacketizerStateProj::Connected(ref mut ap) => {
+                return ap.as_mut().poll(cx, exiting, logger, default_watcher)
             }
-            PacketizerState::Reconnecting(ref mut c) => try_ready!(c.poll()),
+            PacketizerStateProj::Reconnecting(ref mut c) => ready!(c.as_mut().poll(cx)?),
         };
 
         // we are now connected!
-        mem::replace(self, PacketizerState::Connected(ap));
-        self.poll(exiting, logger, default_watcher)
+        self.set(PacketizerState::Connected(ap));
+        self.poll(cx, exiting, logger, default_watcher)
     }
 }
 
@@ -105,13 +120,14 @@ impl<S> Packetizer<S>
 where
     S: ZooKeeperTransport,
 {
-    fn poll_enqueue(&mut self) -> Result<Async<()>, ()> {
-        while let PacketizerState::Connected(ref mut ap) = self.state {
-            let (mut item, tx) = match try_ready!(self.rx.poll()) {
+    fn poll_enqueue(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), ()>> {
+        let mut this = self.project();
+        while let PacketizerStateProj::Connected(ref mut ap) = this.state.as_mut().project() {
+            let (mut item, tx) = match ready!(this.rx.poll_next_unpin(cx)) {
                 Some((request, response)) => (request, response),
-                None => return Err(()),
+                None => return Poll::Ready(Err(())),
             };
-            debug!(self.logger, "enqueueing request {:?}", item; "xid" => self.xid);
+            debug!(this.logger, "enqueueing request {:?}", item; "xid" => *this.xid);
 
             match item {
                 Request::GetData {
@@ -140,14 +156,15 @@ where
                                 _ => unreachable!(),
                             };
                             trace!(
-                                self.logger,
+                                this.logger,
                                 "adding pending watcher";
-                                "xid" => self.xid,
+                                "xid" => *this.xid,
                                 "path" => path,
                                 "wtype" => ?wtype
                             );
-                            ap.pending_watchers
-                                .insert(self.xid, (path.to_string(), w, wtype));
+                            ap.as_mut()
+                                .pending_watchers()
+                                .insert(*this.xid, (path.to_string(), w, wtype));
                         } else {
                             unreachable!();
                         }
@@ -156,10 +173,10 @@ where
                 _ => {}
             }
 
-            ap.enqueue(self.xid, item, tx);
-            self.xid += 1;
+            ap.as_mut().enqueue(*this.xid, item, tx);
+            *this.xid += 1;
         }
-        Ok(Async::NotReady)
+        Poll::Pending
     }
 }
 
@@ -167,31 +184,34 @@ impl<S> Future for Packetizer<S>
 where
     S: ZooKeeperTransport,
 {
-    type Item = ();
-    type Error = failure::Error;
+    type Output = Result<(), failure::Error>;
 
-    fn poll(&mut self) -> Result<Async<Self::Item>, Self::Error> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         trace!(self.logger, "packetizer polled");
         if !self.exiting {
             trace!(self.logger, "poll_enqueue");
-            match self.poll_enqueue() {
-                Ok(_) => {}
-                Err(()) => {
+            match self.as_mut().poll_enqueue(cx) {
+                Poll::Ready(Ok(())) | Poll::Pending => {}
+                Poll::Ready(Err(())) => {
+                    let this = self.as_mut().project();
                     // no more requests will be enqueued
-                    self.exiting = true;
+                    *this.exiting = true;
 
-                    if let PacketizerState::Connected(ref mut ap) = self.state {
+                    if let PacketizerStateProj::Connected(ref mut ap) = this.state.project() {
                         // send CloseSession
                         // length is fixed
-                        ap.outbox
+                        ap.as_mut()
+                            .outbox()
                             .write_i32::<BigEndian>(8)
                             .expect("Vec::write should never fail");
                         // xid
-                        ap.outbox
+                        ap.as_mut()
+                            .outbox()
                             .write_i32::<BigEndian>(0)
                             .expect("Vec::write should never fail");
                         // opcode
-                        ap.outbox
+                        ap.as_mut()
+                            .outbox()
                             .write_i32::<BigEndian>(request::OpCode::CloseSession as i32)
                             .expect("Vec::write should never fail");
                     } else {
@@ -201,72 +221,70 @@ where
             }
         }
 
-        match self
+        let mut this = self.as_mut().project();
+        match this
             .state
-            .poll(self.exiting, &mut self.logger, &mut self.default_watcher)
+            .as_mut()
+            .poll(cx, *this.exiting, this.logger, this.default_watcher)
         {
-            Ok(v) => Ok(v),
-            Err(e) => {
+            Poll::Ready(Ok(v)) => Poll::Ready(Ok(v)),
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(e)) => {
                 // if e is disconnect, then purge state and reconnect
                 // for now, assume all errors are disconnects
                 // TODO: test this!
 
-                let password = if let PacketizerState::Connected(ActivePacketizer {
-                    ref mut password,
-                    ..
-                }) = self.state
-                {
-                    password.split_off(0)
-                } else {
-                    // XXX: error while connecting -- don't recurse (for now)
-                    return Err(e);
-                };
+                let password =
+                    if let PacketizerStateProj::Connected(ap) = this.state.as_mut().project() {
+                        ap.take_password()
+                    } else {
+                        // XXX: error while connecting -- don't recurse (for now)
+                        return Poll::Ready(Err(e));
+                    };
 
                 if let PacketizerState::Connected(ActivePacketizer {
                     last_zxid_seen,
                     session_id,
                     ..
-                }) = self.state
+                }) = *this.state
                 {
-                    info!(self.logger, "connection lost; reconnecting";
+                    info!(this.logger, "connection lost; reconnecting";
                           "session_id" => session_id,
                           "last_zxid" => last_zxid_seen
                     );
 
-                    let xid = self.xid;
-                    self.xid += 1;
+                    let xid = *this.xid;
+                    *this.xid += 1;
 
-                    let log = self.logger.clone();
-                    let retry = S::connect(&self.addr)
-                        .map_err(|e| e.into())
-                        .map(move |stream| {
-                            let request = Request::Connect {
-                                protocol_version: 0,
-                                last_zxid_seen,
-                                timeout: 0,
-                                session_id,
-                                passwd: password,
-                                read_only: false,
-                            };
-                            trace!(log, "about to handshake (again)");
+                    let log = this.logger.clone();
+                    let retry =
+                        S::connect(this.addr.clone())
+                            .map_err(|e| e.into())
+                            .map_ok(move |stream| {
+                                let request = Request::Connect {
+                                    protocol_version: 0,
+                                    last_zxid_seen,
+                                    timeout: 0,
+                                    session_id,
+                                    passwd: password,
+                                    read_only: false,
+                                };
+                                trace!(log, "about to handshake (again)");
 
-                            let (tx, rx) = oneshot::channel();
-                            tokio::spawn(rx.then(move |r| {
-                                trace!(log, "re-connection response: {:?}", r);
-                                Ok(())
-                            }));
+                                let (tx, rx) = oneshot::channel();
+                                tokio::spawn(rx.map(move |r| {
+                                    trace!(log, "re-connection response: {:?}", r);
+                                }));
 
-                            let mut ap = ActivePacketizer::new(stream);
-                            ap.enqueue(xid, request, tx);
-                            ap
-                        });
+                                let mut ap = ActivePacketizer::new(stream);
+                                ap.enqueue_unpin(xid, request, tx);
+                                ap
+                            });
 
                     // dropping the old state will also cancel in-flight requests
-                    mem::replace(
-                        &mut self.state,
-                        PacketizerState::Reconnecting(Box::new(retry)),
-                    );
-                    self.poll()
+                    this.state
+                        .set(PacketizerState::Reconnecting(Box::pin(retry)));
+                    self.poll(cx)
                 } else {
                     unreachable!();
                 }
@@ -284,15 +302,16 @@ impl Enqueuer {
     pub(crate) fn enqueue(
         &self,
         request: Request,
-    ) -> impl Future<Item = Result<Response, ZkError>, Error = failure::Error> {
+    ) -> impl Future<Output = Result<Result<Response, ZkError>, failure::Error>> {
         let (tx, rx) = oneshot::channel();
         match self.0.unbounded_send((request, tx)) {
             Ok(()) => {
-                Either::A(rx.map_err(|e| format_err!("failed to enqueue new request: {:?}", e)))
+                Either::Left(rx.map_err(|e| format_err!("failed to enqueue new request: {:?}", e)))
             }
-            Err(e) => {
-                Either::B(Err(format_err!("failed to enqueue new request: {:?}", e)).into_future())
-            }
+            Err(e) => Either::Right(future::ready(Err(format_err!(
+                "failed to enqueue new request: {:?}",
+                e
+            )))),
         }
     }
 }

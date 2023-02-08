@@ -106,120 +106,88 @@ explicitly create a `tokio::Runtime` and then use `Runtime::block_on`.
 ## A somewhat silly example
 
 ```rust
-extern crate tokio;
-#[macro_use]
-extern crate failure;
-extern crate tokio_zookeeper;
-
 use tokio_zookeeper::*;
-use tokio::prelude::*;
+use futures::prelude::*;
 
-tokio::run(
-    ZooKeeper::connect(&"127.0.0.1:2181".parse().unwrap())
-        .and_then(|(zk, default_watcher)| {
-            // let's first check if /example exists. the .watch() causes us to be notified
-            // the next time the "exists" status of /example changes after the call.
-            zk.watch()
-                .exists("/example")
-                .inspect(|(_, stat)| {
-                    // initially, /example does not exist
-                    assert_eq!(stat, &None)
-                })
-                .and_then(|(zk, _)| {
-                    // so let's make it!
-                    zk.create(
-                        "/example",
-                        &b"Hello world"[..],
-                        Acl::open_unsafe(),
-                        CreateMode::Persistent,
-                    )
-                })
-                .inspect(|(_, ref path)| {
-                    assert_eq!(path.as_ref().map(String::as_str), Ok("/example"))
-                })
-                .and_then(|(zk, _)| {
-                    // does it exist now?
-                    zk.watch().exists("/example")
-                })
-                .inspect(|(_, stat)| {
-                    // looks like it!
-                    // note that the creation above also triggered our "exists" watch!
-                    assert_eq!(stat.unwrap().data_length as usize, b"Hello world".len())
-                })
-                .and_then(|(zk, _)| {
-                    // did the data get set correctly?
-                    zk.get_data("/example")
-                })
-                .inspect(|(_, res)| {
-                    let data = b"Hello world";
-                    let res = res.as_ref().unwrap();
-                    assert_eq!(res.0, data);
-                    assert_eq!(res.1.data_length as usize, data.len());
-                })
-                .and_then(|(zk, res)| {
-                    // let's update the data.
-                    zk.set_data("/example", Some(res.unwrap().1.version), &b"Bye world"[..])
-                })
-                .inspect(|(_, stat)| {
-                    assert_eq!(stat.unwrap().data_length as usize, "Bye world".len());
-                })
-                .and_then(|(zk, _)| {
-                    // create a child of /example
-                    zk.create(
-                        "/example/more",
-                        &b"Hello more"[..],
-                        Acl::open_unsafe(),
-                        CreateMode::Persistent,
-                    )
-                })
-                .inspect(|(_, ref path)| {
-                    assert_eq!(path.as_ref().map(String::as_str), Ok("/example/more"))
-                })
-                .and_then(|(zk, _)| {
-                    // it should be visible as a child of /example
-                    zk.get_children("/example")
-                })
-                .inspect(|(_, children)| {
-                    assert_eq!(children, &Some(vec!["more".to_string()]));
-                })
-                .and_then(|(zk, _)| {
-                    // it is not legal to delete a node that has children directly
-                    zk.delete("/example", None)
-                })
-                .inspect(|(_, res)| assert_eq!(res, &Err(error::Delete::NotEmpty)))
-                .and_then(|(zk, _)| {
-                    // instead we must delete the children first
-                    zk.delete("/example/more", None)
-                })
-                .inspect(|(_, res)| assert_eq!(res, &Ok(())))
-                .and_then(|(zk, _)| zk.delete("/example", None))
-                .inspect(|(_, res)| assert_eq!(res, &Ok(())))
-                .and_then(|(zk, _)| {
-                    // no /example should no longer exist!
-                    zk.exists("/example")
-                })
-                .inspect(|(_, stat)| assert_eq!(stat, &None))
-                .and_then(move |(zk, _)| {
-                    // now let's check that the .watch().exists we did in the very
-                    // beginning actually triggered!
-                    default_watcher
-                        .into_future()
-                        .map(move |x| (zk, x))
-                        .map_err(|e| format_err!("stream error: {:?}", e.0))
-                })
-                .inspect(|(_, (event, _))| {
-                    assert_eq!(
-                        event,
-                        &Some(WatchedEvent {
-                            event_type: WatchedEventType::NodeCreated,
-                            keeper_state: KeeperState::SyncConnected,
-                            path: String::from("/example"),
-                        })
-                    );
-                })
-        })
-        .map(|_| ())
-        .map_err(|e| panic!("{:?}", e)),
+let (zk, default_watcher) = ZooKeeper::connect(&"127.0.0.1:2181".parse().unwrap())
+    .await
+    .unwrap();
+
+// let's first check if /example exists. the .watch() causes us to be notified
+// the next time the "exists" status of /example changes after the call.
+let stat = zk.watch().exists("/example").await.unwrap();
+// initially, /example does not exist
+assert_eq!(stat, None);
+// so let's make it!
+let path = zk
+    .create(
+        "/example",
+        &b"Hello world"[..],
+        Acl::open_unsafe(),
+        CreateMode::Persistent,
+    )
+    .await
+    .unwrap();
+assert_eq!(path.as_deref(), Ok("/example"));
+
+// does it exist now?
+let stat = zk.watch().exists("/example").await.unwrap();
+// looks like it!
+// note that the creation above also triggered our "exists" watch!
+assert_eq!(stat.unwrap().data_length as usize, b"Hello world".len());
+
+// did the data get set correctly?
+let res = zk.get_data("/example").await.unwrap();
+let data = b"Hello world";
+let res = res.unwrap();
+assert_eq!(res.0, data);
+assert_eq!(res.1.data_length as usize, data.len());
+
+// let's update the data.
+let stat = zk
+    .set_data("/example", Some(res.1.version), &b"Bye world"[..])
+    .await
+    .unwrap();
+assert_eq!(stat.unwrap().data_length as usize, "Bye world".len());
+
+// create a child of /example
+let path = zk
+    .create(
+        "/example/more",
+        &b"Hello more"[..],
+        Acl::open_unsafe(),
+        CreateMode::Persistent,
+    )
+    .await
+    .unwrap();
+assert_eq!(path.as_deref(), Ok("/example/more"));
+
+// it should be visible as a child of /example
+let children = zk.get_children("/example").await.unwrap();
+assert_eq!(children, Some(vec!["more".to_string()]));
+
+// it is not legal to delete a node that has children directly
+let res = zk.delete("/example", None).await.unwrap();
+assert_eq!(res, Err(error::Delete::NotEmpty));
+// instead we must delete the children first
+let res = zk.delete("/example/more", None).await.unwrap();
+assert_eq!(res, Ok(()));
+let res = zk.delete("/example", None).await.unwrap();
+assert_eq!(res, Ok(()));
+// no /example should no longer exist!
+let stat = zk.exists("/example").await.unwrap();
+assert_eq!(stat, None);
+
+// now let's check that the .watch().exists we did in the very
+// beginning actually triggered!
+let (event, _w) = default_watcher.into_future().await;
+assert_eq!(
+    event,
+    Some(WatchedEvent {
+        event_type: WatchedEventType::NodeCreated,
+        keeper_state: KeeperState::SyncConnected,
+        path: String::from("/example"),
+    })
 );
 ```
 

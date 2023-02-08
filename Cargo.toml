@@ -15,19 +15,26 @@ categories = ["api-bindings", "asynchronous", "network-programming"]
 
 license = "MIT/Apache-2.0"
 
+edition = "2021"
+
 [badges]
 travis-ci = { repository = "jonhoo/tokio-zookeeper" }
 maintenance = { status = "experimental" }
 
 [dependencies]
-futures = "0.1"
-tokio = "0.1"
+futures = "0.3"
+tokio = { version = "1.22", features = ["net", "rt", "time"] }
 failure = "0.1"
 byteorder = "1.2"
 lazy_static = "1.0"
 slog = "2.3.2"
+async-trait = "0.1.58"
+pin-project = "1.0.12"
 #slog = { version = "2.3.2", features = ['max_level_trace'] }
 
 [dev-dependencies]
+tokio = { version = "1.22", features = ["macros"] }
 slog-async = "2.3.0"
 slog-term = "2.4.0"
+
+[features]
