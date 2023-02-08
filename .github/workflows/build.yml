@@ -5,10 +5,15 @@ on: [push, pull_request]
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust: [stable, beta, nightly]
+        zookeeper: [3.4.13, 3.4.10]
     steps:
       - name: Check out repository code
         uses: actions/checkout@v3
-      - run: wget -O zookeeper.tar.gz http://archive.apache.org/dist/zookeeper/zookeeper-${ZOOKEEPER_VERSION}/zookeeper-${ZOOKEEPER_VERSION}.tar.gz
+      - run: rustup default ${{ matrix.rust }}
+      - run: wget -O zookeeper.tar.gz http://archive.apache.org/dist/zookeeper/zookeeper-${{ matrix.zookeeper }}}/zookeeper-${{ matrix.zookeeper }}.tar.gz
       - run: mkdir zookeeper
       - run: tar -zxvf zookeeper.tar.gz -C zookeeper --strip-components 1
       - run: ./travis/before_script.sh
