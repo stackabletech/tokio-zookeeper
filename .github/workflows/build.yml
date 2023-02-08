@@ -2,8 +2,10 @@
 name: Build
 on:
   push:
-  tags:
-    - "*"
+    branches:
+      - main
+    tags:
+      - "*"
   pull_request:
 
 jobs:
