@@ -1,0 +1,19 @@
+---
+name: Build
+on:
+  push:
+  tags:
+    - "*"
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v3
+      - run: wget -O zookeeper.tar.gz http://archive.apache.org/dist/zookeeper/zookeeper-${ZOOKEEPER_VERSION}/zookeeper-${ZOOKEEPER_VERSION}.tar.gz
+      - run: mkdir zookeeper
+      - run: tar -zxvf zookeeper.tar.gz -C zookeeper --strip-components 1
+      - run: ./travis/before_script.sh
+      - run: cargo test
