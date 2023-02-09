@@ -18,7 +18,6 @@ license = "MIT/Apache-2.0"
 edition = "2021"
 
 [badges]
-travis-ci = { repository = "jonhoo/tokio-zookeeper" }
 maintenance = { status = "experimental" }
 
 [dependencies]
