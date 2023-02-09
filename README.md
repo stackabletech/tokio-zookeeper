@@ -99,9 +99,10 @@ basic tutorial (that uses the Java client)
 
 ### Interaction with Tokio
 
-The futures in this crate expect to be running under a `tokio::Runtime`. In the common case,
-you cannot resolve them solely using `.wait()`, but should instead use `tokio::run` or
-explicitly create a `tokio::Runtime` and then use `Runtime::block_on`.
+The futures in this crate expect to be running under a `tokio::runtime::Runtime`. In the common case,
+they would be executed by `.await`ing them in a context that is executed via `#[tokio::main]`
+or `#[tokio::test]`. You can also explicitly create a `tokio::runtime::Runtime` and then use
+`Runtime::block_on` or `Runtime::spawn`.
 
 ## A somewhat silly example
 
@@ -191,37 +192,8 @@ assert_eq!(
 );
 ```
 
-# Live-coding
-
-The crate is under development as part of a live-coding stream series
-intended for users who are already somewhat familiar with Rust, and who
-want to see something larger and more involved be built. For
-futures-related stuff, I can also highly recommend @aturon's in-progress
-[Async in Rust
-book](https://aturon.github.io/apr/async-in-rust/chapter.html).
-
-You can find the recordings of past sessions in [this YouTube
-playlist](https://www.youtube.com/playlist?list=PLqbS7AVVErFgY2faCIYjJZv_RluGkTlKt).
-This crate started out in [this
-video](https://www.youtube.com/watch?v=mMuk8Rn9HBg), and got fleshed out
-more in [this follow-up](https://www.youtube.com/watch?v=0-Fsu-aM0_A), before
-we mostly finished it in [part 3](https://www.youtube.com/watch?v=1ADDeB9rqAI).
-I recommend you also take a look at the [ZooKeeper Programming
-Guide](https://zookeeper.apache.org/doc/current/zookeeperProgrammers.html) if
-you want to follow along. To get updates about future streams, follow me on
-[Patreon](https://www.patreon.com/jonhoo) or
-[Twitter](https://twitter.com/jonhoo).
-
 # Thank you
 
-For each of the projects I build, I like to thank the people who are
-willing and able to take the extra step of supporting me in making these
-videos on [Patreon](https://www.patreon.com/jonhoo) or
-[Liberapay](https://liberapay.com/jonhoo/). You have my most sincere
-gratitude, and I'm so excited that you find what I do interesting enough
-that you're willing to give a stranger money to do something they love!
-
- - Rodrigo Valin
- - Pigeon F
- - Patrick Allen
- - Matthew Knight
+This crate was originally developed by [Jon Gjengset (@jonhoo)](https://github.com/jonhoo/) as part of
+[his long-standing series of streams](https://www.youtube.com/playlist?list=PLqbS7AVVErFgY2faCIYjJZv_RluGkTlKt),
+starting at [this video](https://www.youtube.com/watch?v=mMuk8Rn9HBg&list=PLqbS7AVVErFgY2faCIYjJZv_RluGkTlKt&index=9).
