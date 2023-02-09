@@ -25,5 +25,5 @@ jobs:
       - run: wget -O zookeeper.tar.gz https://dlcdn.apache.org/zookeeper/zookeeper-${{ matrix.zookeeper }}/apache-zookeeper-${{ matrix.zookeeper }}-bin.tar.gz
       - run: mkdir zookeeper
       - run: tar -zxvf zookeeper.tar.gz -C zookeeper --strip-components 1
-      - run: ./travis/before_script.sh
+      - run: ./scripts/ci-start-zookeeper
       - run: cargo test
