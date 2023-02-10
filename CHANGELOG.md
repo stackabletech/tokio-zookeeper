@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.0] - 2023-02-10
+
 ### Highlights
 
 tokio-zookeeper now uses futures 0.3 and Tokio 1, which means that it is
