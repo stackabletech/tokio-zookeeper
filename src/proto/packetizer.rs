@@ -242,7 +242,10 @@ where
                         return Poll::Ready(Err(e));
                     };
 
-                if let PacketizerState::Connected(ActivePacketizer {
+                if *this.exiting {
+                    debug!(this.logger, "connection lost during exit; not reconnecting");
+                    Poll::Ready(Ok(()))
+                } else if let PacketizerState::Connected(ActivePacketizer {
                     last_zxid_seen,
                     session_id,
                     ..
