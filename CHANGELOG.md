@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Don't try to reconnect during exit ([#30]).
+
+[#30]: https://github.com/stackabletech/tokio-zookeeper/pull/30
+
 ## [0.2.0] - 2023-02-10
 
 ### Highlights
