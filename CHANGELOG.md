@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.1] - 2023-02-13
+
 ### Changed
 
 - Don't try to reconnect during exit ([#30]).
