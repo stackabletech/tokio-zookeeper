@@ -1,13 +1,13 @@
 use super::{request, watch::WatchType, Request, Response};
 use crate::{WatchedEvent, WatchedEventType, ZkError};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use failure::format_err;
 use futures::{
     channel::{mpsc, oneshot},
     ready,
 };
 use pin_project::pin_project;
 use slog::{debug, info, trace};
+use snafu::{Snafu, Whatever};
 use std::collections::HashMap;
 use std::{
     future::Future,
@@ -17,6 +17,27 @@ use std::{
     time,
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+#[derive(Debug, Snafu)]
+pub enum Error {
+    #[snafu(transparent)]
+    Io { source: std::io::Error },
+    #[snafu(transparent)]
+    Whatever { source: Whatever },
+
+    #[snafu(display("connection closed with {len} bytes left in buffer: {buf:x?}", len = buf.len()))]
+    ConnectionClosed { buf: Vec<u8> },
+
+    #[snafu(display("Not exiting, but server closed connection"))]
+    ServerClosedConnection,
+    #[snafu(display("outstanding requests, but response channel closed"))]
+    ResponseChannelClosedPrematurely,
+
+    #[snafu(display("bad response to ping: {error_code:?}"))]
+    BadPing { error_code: ZkError },
+    #[snafu(display("failed to close session: {error_code:?}"))]
+    CloseSession { error_code: ZkError },
+}
 
 #[pin_project]
 pub(super) struct ActivePacketizer<S> {
@@ -56,6 +77,8 @@ pub(super) struct ActivePacketizer<S> {
     pub(super) session_id: i64,
     pub(super) password: Vec<u8>,
 }
+
+type ReplySender = oneshot::Sender<Result<Response, ZkError>>;
 
 impl<S> ActivePacketizer<S>
 where
@@ -103,7 +126,7 @@ where
 
     fn enqueue_impl(
         outbox: &mut Vec<u8>,
-        reply: &mut HashMap<i32, (request::OpCode, oneshot::Sender<Result<Response, ZkError>>)>,
+        reply: &mut HashMap<i32, (request::OpCode, ReplySender)>,
         xid: i32,
         item: Request,
         tx: oneshot::Sender<Result<Response, ZkError>>,
@@ -163,7 +186,7 @@ where
         cx: &mut Context,
         exiting: bool,
         logger: &mut slog::Logger,
-    ) -> Poll<Result<(), failure::Error>>
+    ) -> Poll<Result<(), Error>>
     where
         S: AsyncWrite,
     {
@@ -190,11 +213,7 @@ where
                 .reset(tokio::time::Instant::now() + *this.timeout);
         }
 
-        ready!(this
-            .stream
-            .as_mut()
-            .poll_flush(cx)
-            .map_err(failure::Error::from)?);
+        ready!(this.stream.as_mut().poll_flush(cx)?);
 
         if exiting {
             debug!(logger, "shutting down writer");
@@ -209,7 +228,7 @@ where
         cx: &mut Context,
         default_watcher: &mut mpsc::UnboundedSender<WatchedEvent>,
         logger: &mut slog::Logger,
-    ) -> Poll<Result<(), failure::Error>>
+    ) -> Poll<Result<(), Error>>
     where
         S: AsyncRead,
     {
@@ -233,11 +252,12 @@ where
                         this.inbox.truncate(read_from + n);
                         if n == 0 {
                             if self.inlen() != 0 {
-                                return Poll::Ready(Err(format_err!(
-                                    "connection closed with {} bytes left in buffer: {:x?}",
-                                    self.inlen(),
-                                    &self.inbox[self.instart..]
-                                )));
+                                return Poll::Ready(
+                                    ConnectionClosedSnafu {
+                                        buf: &self.inbox[self.instart..],
+                                    }
+                                    .fail(),
+                                );
                             } else {
                                 // Server closed session with no bytes left in buffer
                                 debug!(logger, "server closed connection");
@@ -293,7 +313,7 @@ where
                     // XXX: in theory, server should now shut down receive end
                     trace!(logger, "got response to CloseSession");
                     if let Some(e) = err {
-                        return Poll::Ready(Err(format_err!("failed to close session: {:?}", e)));
+                        return Poll::Ready(CloseSessionSnafu { error_code: e }.fail());
                     }
                 } else if xid == -1 {
                     // watch event
@@ -348,7 +368,7 @@ where
                     // response to ping -- empty response
                     trace!(logger, "got response to heartbeat");
                     if let Some(e) = err {
-                        return Poll::Ready(Err(format_err!("bad response to ping: {:?}", e)));
+                        return Poll::Ready(BadPingSnafu { error_code: e }.fail());
                     }
                 } else {
                     // response to user request
@@ -364,10 +384,7 @@ where
                             || (opcode == request::OpCode::Exists && err == Some(ZkError::NoNode))
                         {
                             trace!(logger, "pending watcher turned into real watcher"; "xid" => xid);
-                            this.watchers
-                                .entry(w.0)
-                                .or_insert_with(Vec::new)
-                                .push((w.1, w.2));
+                            this.watchers.entry(w.0).or_default().push((w.1, w.2));
                         } else {
                             trace!(logger,
                                    "pending watcher not turned into real watcher: {:?}",
@@ -429,7 +446,7 @@ where
         exiting: bool,
         logger: &mut slog::Logger,
         default_watcher: &mut mpsc::UnboundedSender<WatchedEvent>,
-    ) -> Poll<Result<(), failure::Error>> {
+    ) -> Poll<Result<(), Error>> {
         trace!(logger, "poll_read");
         let r = self.as_mut().poll_read(cx, default_watcher, logger)?;
 
@@ -467,12 +484,8 @@ where
                 debug!(logger, "packetizer done");
                 Poll::Ready(Ok(()))
             }
-            (Poll::Ready(()), Poll::Ready(())) => Poll::Ready(Err(format_err!(
-                "Not exiting, but server closed connection"
-            ))),
-            (Poll::Ready(()), _) => Poll::Ready(Err(format_err!(
-                "outstanding requests, but response channel closed"
-            ))),
+            (Poll::Ready(()), Poll::Ready(())) => Poll::Ready(ServerClosedConnectionSnafu.fail()),
+            (Poll::Ready(()), _) => Poll::Ready(ResponseChannelClosedPrematurelySnafu.fail()),
             _ => Poll::Pending,
         }
     }
