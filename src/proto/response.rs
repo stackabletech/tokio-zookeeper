@@ -7,11 +7,11 @@ use std::io::{self, Read};
 #[derive(Debug)]
 pub(crate) enum Response {
     Connect {
-        protocol_version: i32,
+        _protocol_version: i32,
         timeout: i32,
         session_id: i64,
         password: Vec<u8>,
-        read_only: bool,
+        _read_only: bool,
     },
     Stat(Stat),
     GetData {
@@ -151,11 +151,11 @@ impl Response {
     pub(super) fn parse(opcode: OpCode, reader: &mut &[u8]) -> Result<Self, failure::Error> {
         match opcode {
             OpCode::CreateSession => Ok(Response::Connect {
-                protocol_version: reader.read_i32::<BigEndian>()?,
+                _protocol_version: reader.read_i32::<BigEndian>()?,
                 timeout: reader.read_i32::<BigEndian>()?,
                 session_id: reader.read_i64::<BigEndian>()?,
                 password: reader.read_buffer()?,
-                read_only: reader.read_u8()? != 0,
+                _read_only: reader.read_u8()? != 0,
             }),
             OpCode::Exists | OpCode::SetData | OpCode::SetACL => {
                 Ok(Response::Stat(Stat::read_from(reader)?))

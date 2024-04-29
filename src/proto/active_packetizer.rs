@@ -364,10 +364,7 @@ where
                             || (opcode == request::OpCode::Exists && err == Some(ZkError::NoNode))
                         {
                             trace!(logger, "pending watcher turned into real watcher"; "xid" => xid);
-                            this.watchers
-                                .entry(w.0)
-                                .or_insert_with(Vec::new)
-                                .push((w.1, w.2));
+                            this.watchers.entry(w.0).or_default().push((w.1, w.2));
                         } else {
                             trace!(logger,
                                    "pending watcher not turned into real watcher: {:?}",
