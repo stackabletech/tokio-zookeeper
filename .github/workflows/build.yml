@@ -4,12 +4,10 @@ on:
   push:
     branches:
       - main
-      - staging
-      - trying
-      - "renovate/**"
     tags:
       - "*"
   pull_request:
+  merge_group:
 
 jobs:
   build:
