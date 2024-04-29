@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- [BREAKING] Migrated errors from Failure to SNAFU ([#39]).
+
+[#39]: https://github.com/stackabletech/tokio-zookeeper/pull/39
+
 ## [0.2.1] - 2023-02-13
 
 ### Changed
