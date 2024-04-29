@@ -1,9 +1,9 @@
 use super::Watch;
 use super::ZkError;
+use crate::{Acl, CreateMode};
 use byteorder::{BigEndian, WriteBytesExt};
 use std::borrow::Cow;
 use std::io::{self, Write};
-use crate::{Acl, CreateMode};
 
 #[derive(Debug)]
 pub(crate) enum Request {

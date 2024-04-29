@@ -192,8 +192,8 @@
 #![deny(missing_debug_implementations)]
 #![deny(missing_copy_implementations)]
 
-use failure::{bail, format_err};
-use futures::{channel::oneshot, Stream, TryFutureExt};
+use futures::{channel::oneshot, Stream};
+use snafu::{whatever as bail, ResultExt, Whatever};
 use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::time;
@@ -209,6 +209,13 @@ use crate::proto::{Watch, ZkError};
 pub use crate::types::{
     Acl, CreateMode, KeeperState, MultiResponse, Permission, Stat, WatchedEvent, WatchedEventType,
 };
+
+macro_rules! format_err {
+    ($($x:tt)*) => {
+        <snafu::Whatever as snafu::FromString>::without_source(format!($($x)*))
+    };
+}
+pub(crate) use format_err;
 
 /// A connection to ZooKeeper.
 ///
@@ -265,13 +272,12 @@ impl ZooKeeperBuilder {
     pub async fn connect(
         self,
         addr: &SocketAddr,
-    ) -> Result<(ZooKeeper, impl Stream<Item = WatchedEvent>), failure::Error> {
+    ) -> Result<(ZooKeeper, impl Stream<Item = WatchedEvent>), Whatever> {
         let (tx, rx) = futures::channel::mpsc::unbounded();
-        tokio::net::TcpStream::connect(addr)
-            .map_err(failure::Error::from)
-            .and_then(move |stream| self.handshake(*addr, stream, tx))
-            .map_ok(move |zk| (zk, rx))
+        let stream = tokio::net::TcpStream::connect(addr)
             .await
+            .whatever_context("connect failed")?;
+        Ok((self.handshake(*addr, stream, tx).await?, rx))
     }
 
     /// Set the ZooKeeper [session expiry
@@ -287,7 +293,7 @@ impl ZooKeeperBuilder {
         addr: SocketAddr,
         stream: tokio::net::TcpStream,
         default_watcher: futures::channel::mpsc::UnboundedSender<WatchedEvent>,
-    ) -> Result<ZooKeeper, failure::Error> {
+    ) -> Result<ZooKeeper, Whatever> {
         let request = proto::Request::Connect {
             protocol_version: 0,
             last_zxid_seen: 0,
@@ -315,7 +321,7 @@ impl ZooKeeper {
     /// See [`ZooKeeperBuilder::connect`].
     pub async fn connect(
         addr: &SocketAddr,
-    ) -> Result<(Self, impl Stream<Item = WatchedEvent>), failure::Error> {
+    ) -> Result<(Self, impl Stream<Item = WatchedEvent>), Whatever> {
         ZooKeeperBuilder::default().connect(addr).await
     }
 
@@ -355,7 +361,7 @@ impl ZooKeeper {
         data: D,
         acl: A,
         mode: CreateMode,
-    ) -> Result<Result<String, error::Create>, failure::Error>
+    ) -> Result<Result<String, error::Create>, Whatever>
     where
         D: Into<Cow<'static, [u8]>>,
         A: Into<Cow<'static, [Acl]>>,
@@ -389,7 +395,7 @@ impl ZooKeeper {
         path: &str,
         version: Option<i32>,
         data: D,
-    ) -> Result<Result<Stat, error::SetData>, failure::Error>
+    ) -> Result<Result<Stat, error::SetData>, Whatever>
     where
         D: Into<Cow<'static, [u8]>>,
     {
@@ -419,7 +425,7 @@ impl ZooKeeper {
         &self,
         path: &str,
         version: Option<i32>,
-    ) -> Result<Result<(), error::Delete>, failure::Error> {
+    ) -> Result<Result<(), error::Delete>, Whatever> {
         let version = version.unwrap_or(-1);
         self.connection
             .enqueue(proto::Request::Delete {
@@ -439,7 +445,7 @@ impl ZooKeeper {
     pub async fn get_acl(
         &self,
         path: &str,
-    ) -> Result<Result<(Vec<Acl>, Stat), error::GetAcl>, failure::Error> {
+    ) -> Result<Result<(Vec<Acl>, Stat), error::GetAcl>, Whatever> {
         self.connection
             .enqueue(proto::Request::GetAcl {
                 path: path.to_string(),
@@ -463,7 +469,7 @@ impl ZooKeeper {
         path: &str,
         acl: A,
         version: Option<i32>,
-    ) -> Result<Result<Stat, error::SetAcl>, failure::Error>
+    ) -> Result<Result<Stat, error::SetAcl>, Whatever>
     where
         A: Into<Cow<'static, [Acl]>>,
     {
@@ -492,7 +498,7 @@ impl ZooKeeper {
     }
 
     #[instrument]
-    async fn exists_w(&self, path: &str, watch: Watch) -> Result<Option<Stat>, failure::Error> {
+    async fn exists_w(&self, path: &str, watch: Watch) -> Result<Option<Stat>, Whatever> {
         self.connection
             .enqueue(proto::Request::Exists {
                 path: path.to_string(),
@@ -503,7 +509,7 @@ impl ZooKeeper {
     }
 
     /// Return the [`Stat`] of the node of the given `path`, or `None` if the node does not exist.
-    pub async fn exists(&self, path: &str) -> Result<Option<Stat>, failure::Error> {
+    pub async fn exists(&self, path: &str) -> Result<Option<Stat>, Whatever> {
         self.exists_w(path, Watch::None).await
     }
 
@@ -512,7 +518,7 @@ impl ZooKeeper {
         &self,
         path: &str,
         watch: Watch,
-    ) -> Result<Option<Vec<String>>, failure::Error> {
+    ) -> Result<Option<Vec<String>>, Whatever> {
         self.connection
             .enqueue(proto::Request::GetChildren {
                 path: path.to_string(),
@@ -527,7 +533,7 @@ impl ZooKeeper {
     ///
     /// The returned list of children is not sorted and no guarantee is provided as to its natural
     /// or lexical order.
-    pub async fn get_children(&self, path: &str) -> Result<Option<Vec<String>>, failure::Error> {
+    pub async fn get_children(&self, path: &str) -> Result<Option<Vec<String>>, Whatever> {
         self.get_children_w(path, Watch::None).await
     }
 
@@ -536,7 +542,7 @@ impl ZooKeeper {
         &self,
         path: &str,
         watch: Watch,
-    ) -> Result<Option<(Vec<u8>, Stat)>, failure::Error> {
+    ) -> Result<Option<(Vec<u8>, Stat)>, Whatever> {
         self.connection
             .enqueue(proto::Request::GetData {
                 path: path.to_string(),
@@ -548,7 +554,7 @@ impl ZooKeeper {
 
     /// Return the data and the [`Stat`] of the node at the given `path`, or `None` if it does not
     /// exist.
-    pub async fn get_data(&self, path: &str) -> Result<Option<(Vec<u8>, Stat)>, failure::Error> {
+    pub async fn get_data(&self, path: &str) -> Result<Option<(Vec<u8>, Stat)>, Whatever> {
         self.get_data_w(path, Watch::None).await
     }
 
@@ -574,7 +580,7 @@ impl<'a> WatchGlobally<'a> {
     /// If no errors occur, a watch is left on the node at the given `path`. The watch is triggered
     /// by any successful operation that creates or deletes the node, or sets the node's data. When
     /// the watch triggers, an event is sent to the global watcher stream.
-    pub async fn exists(&self, path: &str) -> Result<Option<Stat>, failure::Error> {
+    pub async fn exists(&self, path: &str) -> Result<Option<Stat>, Whatever> {
         self.0.exists_w(path, Watch::Global).await
     }
 
@@ -588,7 +594,7 @@ impl<'a> WatchGlobally<'a> {
     /// by any successful operation that deletes the node at the given `path`, or creates or
     /// deletes a child of that node. When the watch triggers, an event is sent to the global
     /// watcher stream.
-    pub async fn get_children(&self, path: &str) -> Result<Option<Vec<String>>, failure::Error> {
+    pub async fn get_children(&self, path: &str) -> Result<Option<Vec<String>>, Whatever> {
         self.0.get_children_w(path, Watch::Global).await
     }
 
@@ -598,7 +604,7 @@ impl<'a> WatchGlobally<'a> {
     /// If no errors occur, a watch is left on the node at the given `path`. The watch is triggered
     /// by any successful operation that sets the node's data, or deletes it. When the watch
     /// triggers, an event is sent to the global watcher stream.
-    pub async fn get_data(&self, path: &str) -> Result<Option<(Vec<u8>, Stat)>, failure::Error> {
+    pub async fn get_data(&self, path: &str) -> Result<Option<(Vec<u8>, Stat)>, Whatever> {
         self.0.get_data_w(path, Watch::Global).await
     }
 }
@@ -619,7 +625,7 @@ impl<'a> WithWatcher<'a> {
     pub async fn exists(
         &self,
         path: &str,
-    ) -> Result<(oneshot::Receiver<WatchedEvent>, Option<Stat>), failure::Error> {
+    ) -> Result<(oneshot::Receiver<WatchedEvent>, Option<Stat>), Whatever> {
         let (tx, rx) = oneshot::channel();
         self.0
             .exists_w(path, Watch::Custom(tx))
@@ -640,7 +646,7 @@ impl<'a> WithWatcher<'a> {
     pub async fn get_children(
         &self,
         path: &str,
-    ) -> Result<Option<(oneshot::Receiver<WatchedEvent>, Vec<String>)>, failure::Error> {
+    ) -> Result<Option<(oneshot::Receiver<WatchedEvent>, Vec<String>)>, Whatever> {
         let (tx, rx) = oneshot::channel();
         self.0
             .get_children_w(path, Watch::Custom(tx))
@@ -657,7 +663,7 @@ impl<'a> WithWatcher<'a> {
     pub async fn get_data(
         &self,
         path: &str,
-    ) -> Result<Option<(oneshot::Receiver<WatchedEvent>, Vec<u8>, Stat)>, failure::Error> {
+    ) -> Result<Option<(oneshot::Receiver<WatchedEvent>, Vec<u8>, Stat)>, Whatever> {
         let (tx, rx) = oneshot::channel();
         self.0
             .get_data_w(path, Watch::Custom(tx))
@@ -730,7 +736,7 @@ impl<'a> MultiBuilder<'a> {
     }
 
     /// Run executes the attached requests in one atomic unit.
-    pub async fn run(self) -> Result<Vec<Result<MultiResponse, error::Multi>>, failure::Error> {
+    pub async fn run(self) -> Result<Vec<Result<MultiResponse, error::Multi>>, Whatever> {
         let (zk, requests) = (self.zk, self.requests);
         let reqs_lite: Vec<transform::RequestMarker> = requests.iter().map(|r| r.into()).collect();
         zk.connection
@@ -785,10 +791,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(path.as_ref().map(String::as_str), Ok("/foo"));
-        let event = exists_w
-            .map_err(|e| format_err!("exists_w failed: {:?}", e))
-            .await
-            .unwrap();
+        let event = exists_w.await.expect("exists_w failed");
         assert_eq!(
             event,
             WatchedEvent {
@@ -1019,13 +1022,13 @@ mod tests {
         init();
         let builder = ZooKeeperBuilder::default();
 
-        async fn check_exists(zk: &ZooKeeper, paths: &[&str]) -> Result<Vec<bool>, failure::Error> {
+        async fn check_exists(zk: &ZooKeeper, paths: &[&str]) -> Result<Vec<bool>, Whatever> {
             let mut res = Vec::new();
             for p in paths {
                 let exists = zk.exists(p).await?;
                 res.push(exists.is_some());
             }
-            Result::<_, failure::Error>::Ok(res)
+            Result::<_, Whatever>::Ok(res)
         }
 
         let (zk, _) = builder
@@ -1064,7 +1067,9 @@ mod tests {
             res,
             &[
                 Err(error::Multi::RolledBack),
-                Err(error::Multi::Create(error::Create::NodeExists)),
+                Err(error::Multi::Create {
+                    source: error::Create::NodeExists
+                }),
                 Err(error::Multi::Skipped),
                 Err(error::Multi::Skipped),
             ]
@@ -1096,9 +1101,9 @@ mod tests {
         assert_eq!(
             res,
             [
-                Err(error::Multi::Check(error::Check::BadVersion {
-                    expected: 0
-                })),
+                Err(error::Multi::Check {
+                    source: error::Check::BadVersion { expected: 0 }
+                }),
                 Err(error::Multi::Skipped),
             ]
         );
@@ -1106,7 +1111,12 @@ mod tests {
         let res = check_exists(&zk, &["/a", "/b", "/c", "/d"]).await.unwrap();
         assert_eq!(res, &[false, true, true, false]);
         let res = zk.multi().check("/a", 0).run().await.unwrap();
-        assert_eq!(res, &[Err(error::Multi::Check(error::Check::NoNode)),]);
+        assert_eq!(
+            res,
+            &[Err(error::Multi::Check {
+                source: error::Check::NoNode
+            }),]
+        );
 
         let res = zk
             .multi()

@@ -4,10 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## Changed
+### Changed
 
+- [BREAKING] Migrated errors from Failure to SNAFU ([#39]).
 - [BREAKING] Migrated from `slog` to `tracing` ([#40]).
+- Updated ZooKeeper versions we test against (now 3.9.2, 3.8.4, 3.7.2, 3.6.4, 3.5.10) ([#39]).
 
+[#39]: https://github.com/stackabletech/tokio-zookeeper/pull/39
 [#40]: https://github.com/stackabletech/tokio-zookeeper/pull/40
 
 ## [0.2.1] - 2023-02-13

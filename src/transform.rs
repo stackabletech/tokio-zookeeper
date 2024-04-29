@@ -1,11 +1,11 @@
-use failure::{bail, format_err};
+use snafu::{whatever as bail, Whatever};
 
 use crate::proto::{Request, Response, ZkError};
 use crate::{error, Acl, MultiResponse, Stat};
 
 pub(crate) fn create(
     res: Result<Response, ZkError>,
-) -> Result<Result<String, error::Create>, failure::Error> {
+) -> Result<Result<String, error::Create>, Whatever> {
     match res {
         Ok(Response::String(s)) => Ok(Ok(s)),
         Ok(r) => bail!("got non-string response to create: {:?}", r),
@@ -13,14 +13,14 @@ pub(crate) fn create(
         Err(ZkError::NodeExists) => Ok(Err(error::Create::NodeExists)),
         Err(ZkError::InvalidACL) => Ok(Err(error::Create::InvalidAcl)),
         Err(ZkError::NoChildrenForEphemerals) => Ok(Err(error::Create::NoChildrenForEphemerals)),
-        Err(e) => Err(format_err!("create call failed: {:?}", e)),
+        Err(e) => bail!("create call failed: {:?}", e),
     }
 }
 
 pub(crate) fn set_data(
     version: i32,
     res: Result<Response, ZkError>,
-) -> Result<Result<Stat, error::SetData>, failure::Error> {
+) -> Result<Result<Stat, error::SetData>, Whatever> {
     match res {
         Ok(Response::Stat(stat)) => Ok(Ok(stat)),
         Ok(r) => bail!("got a non-stat response to a set_data request: {:?}", r),
@@ -34,32 +34,32 @@ pub(crate) fn set_data(
 pub(crate) fn delete(
     version: i32,
     res: Result<Response, ZkError>,
-) -> Result<Result<(), error::Delete>, failure::Error> {
+) -> Result<Result<(), error::Delete>, Whatever> {
     match res {
         Ok(Response::Empty) => Ok(Ok(())),
         Ok(r) => bail!("got non-empty response to delete: {:?}", r),
         Err(ZkError::NoNode) => Ok(Err(error::Delete::NoNode)),
         Err(ZkError::NotEmpty) => Ok(Err(error::Delete::NotEmpty)),
         Err(ZkError::BadVersion) => Ok(Err(error::Delete::BadVersion { expected: version })),
-        Err(e) => Err(format_err!("delete call failed: {:?}", e)),
+        Err(e) => bail!("delete call failed: {:?}", e),
     }
 }
 
 pub(crate) fn get_acl(
     res: Result<Response, ZkError>,
-) -> Result<Result<(Vec<Acl>, Stat), error::GetAcl>, failure::Error> {
+) -> Result<Result<(Vec<Acl>, Stat), error::GetAcl>, Whatever> {
     match res {
         Ok(Response::GetAcl { acl, stat }) => Ok(Ok((acl, stat))),
         Ok(r) => bail!("got non-acl response to a get_acl request: {:?}", r),
         Err(ZkError::NoNode) => Ok(Err(error::GetAcl::NoNode)),
-        Err(e) => Err(format_err!("get_acl call failed: {:?}", e)),
+        Err(e) => bail!("get_acl call failed: {:?}", e),
     }
 }
 
 pub(crate) fn set_acl(
     version: i32,
     res: Result<Response, ZkError>,
-) -> Result<Result<Stat, error::SetAcl>, failure::Error> {
+) -> Result<Result<Stat, error::SetAcl>, Whatever> {
     match res {
         Ok(Response::Stat(stat)) => Ok(Ok(stat)),
         Ok(r) => bail!("got non-stat response to a set_acl request: {:?}", r),
@@ -67,11 +67,11 @@ pub(crate) fn set_acl(
         Err(ZkError::BadVersion) => Ok(Err(error::SetAcl::BadVersion { expected: version })),
         Err(ZkError::InvalidACL) => Ok(Err(error::SetAcl::InvalidAcl)),
         Err(ZkError::NoAuth) => Ok(Err(error::SetAcl::NoAuth)),
-        Err(e) => Err(format_err!("set_acl call failed: {:?}", e)),
+        Err(e) => bail!("set_acl call failed: {:?}", e),
     }
 }
 
-pub(crate) fn exists(res: Result<Response, ZkError>) -> Result<Option<Stat>, failure::Error> {
+pub(crate) fn exists(res: Result<Response, ZkError>) -> Result<Option<Stat>, Whatever> {
     match res {
         Ok(Response::Stat(stat)) => Ok(Some(stat)),
         Ok(r) => bail!("got a non-create response to a create request: {:?}", r),
@@ -82,30 +82,30 @@ pub(crate) fn exists(res: Result<Response, ZkError>) -> Result<Option<Stat>, fai
 
 pub(crate) fn get_children(
     res: Result<Response, ZkError>,
-) -> Result<Option<Vec<String>>, failure::Error> {
+) -> Result<Option<Vec<String>>, Whatever> {
     match res {
         Ok(Response::Strings(children)) => Ok(Some(children)),
         Ok(r) => bail!("got non-strings response to get-children: {:?}", r),
         Err(ZkError::NoNode) => Ok(None),
-        Err(e) => Err(format_err!("get-children call failed: {:?}", e)),
+        Err(e) => bail!("get-children call failed: {:?}", e),
     }
 }
 
 pub(crate) fn get_data(
     res: Result<Response, ZkError>,
-) -> Result<Option<(Vec<u8>, Stat)>, failure::Error> {
+) -> Result<Option<(Vec<u8>, Stat)>, Whatever> {
     match res {
         Ok(Response::GetData { bytes, stat }) => Ok(Some((bytes, stat))),
         Ok(r) => bail!("got non-data response to get-data: {:?}", r),
         Err(ZkError::NoNode) => Ok(None),
-        Err(e) => Err(format_err!("get-data call failed: {:?}", e)),
+        Err(e) => bail!("get-data call failed: {:?}", e),
     }
 }
 
 pub(crate) fn check(
     version: i32,
     res: Result<Response, ZkError>,
-) -> Result<Result<(), error::Check>, failure::Error> {
+) -> Result<Result<(), error::Check>, Whatever> {
     match res {
         Ok(Response::Empty) => Ok(Ok(())),
         Ok(r) => bail!("got a non-check response to a check request: {:?}", r),
@@ -146,7 +146,7 @@ impl From<&Request> for RequestMarker {
 pub(crate) fn multi(
     req: &RequestMarker,
     res: Result<Response, ZkError>,
-) -> Result<Result<MultiResponse, error::Multi>, failure::Error> {
+) -> Result<Result<MultiResponse, error::Multi>, Whatever> {
     // Handle multi-specific errors.
     match res {
         Err(ZkError::Ok) => return Ok(Err(error::Multi::RolledBack)),
