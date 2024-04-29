@@ -4,12 +4,10 @@ on:
   push:
     branches:
       - main
-      - staging
-      - trying
-      - "renovate/**"
     tags:
       - "*"
   pull_request:
+  merge_group:
 
 jobs:
   build:
@@ -17,12 +15,12 @@ jobs:
     strategy:
       matrix:
         rust: [stable, beta, nightly]
-        zookeeper: [3.8.1, 3.7.1, 3.6.4, 3.5.10]
+        zookeeper: [3.9.2, 3.8.4, 3.7.2, 3.6.4, 3.5.10]
     steps:
       - name: Check out repository code
         uses: actions/checkout@v3
       - run: rustup default ${{ matrix.rust }}
-      - run: wget -O zookeeper.tar.gz https://dlcdn.apache.org/zookeeper/zookeeper-${{ matrix.zookeeper }}/apache-zookeeper-${{ matrix.zookeeper }}-bin.tar.gz
+      - run: wget -O zookeeper.tar.gz https://archive.apache.org/dist/zookeeper/zookeeper-${{ matrix.zookeeper }}/apache-zookeeper-${{ matrix.zookeeper }}-bin.tar.gz
       - run: mkdir zookeeper
       - run: tar -zxvf zookeeper.tar.gz -C zookeeper --strip-components 1
       - run: ./scripts/ci-start-zookeeper

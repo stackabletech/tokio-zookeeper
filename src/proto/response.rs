@@ -148,7 +148,7 @@ impl<R: Read> StringReader for R {
 }
 
 impl Response {
-    pub(super) fn parse(opcode: OpCode, reader: &mut &[u8]) -> Result<Self, failure::Error> {
+    pub(super) fn parse(opcode: OpCode, reader: &mut &[u8]) -> io::Result<Self> {
         match opcode {
             OpCode::CreateSession => Ok(Response::Connect {
                 protocol_version: reader.read_i32::<BigEndian>()?,

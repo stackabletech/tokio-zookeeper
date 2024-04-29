@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- [BREAKING] Migrated errors from Failure to SNAFU ([#39]).
+- Updated ZooKeeper versions we test against (now 3.9.2, 3.8.4, 3.7.2, 3.6.4, 3.5.10) ([#39]).
+
+[#39]: https://github.com/stackabletech/tokio-zookeeper/pull/39
+
 ## [0.2.1] - 2023-02-13
 
 ### Changed
