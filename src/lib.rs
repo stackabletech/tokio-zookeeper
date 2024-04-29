@@ -194,10 +194,10 @@
 
 use failure::{bail, format_err};
 use futures::{channel::oneshot, Stream, TryFutureExt};
-use slog::{debug, o, trace};
 use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::time;
+use tracing::{debug, instrument, trace};
 
 /// Per-operation ZooKeeper error types.
 pub mod error;
@@ -237,24 +237,18 @@ pub use crate::types::{
 pub struct ZooKeeper {
     #[allow(dead_code)]
     connection: proto::Enqueuer,
-    logger: slog::Logger,
 }
 
 /// Builder that allows customizing options for ZooKeeper connections.
-#[derive(Debug, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct ZooKeeperBuilder {
     session_timeout: time::Duration,
-    logger: slog::Logger,
 }
 
 impl Default for ZooKeeperBuilder {
     fn default() -> Self {
-        let drain = slog::Discard;
-        let root = slog::Logger::root(drain, o!());
-
         ZooKeeperBuilder {
             session_timeout: time::Duration::new(0, 0),
-            logger: root,
         }
     }
 }
@@ -288,14 +282,6 @@ impl ZooKeeperBuilder {
         self.session_timeout = t;
     }
 
-    /// Set the logger that should be used internally in the ZooKeeper client.
-    ///
-    /// By default, all logging is disabled. See also [the `slog`
-    /// documentation](https://docs.rs/slog).
-    pub fn set_logger(&mut self, l: slog::Logger) {
-        self.logger = l;
-    }
-
     async fn handshake(
         self,
         addr: SocketAddr,
@@ -311,15 +297,13 @@ impl ZooKeeperBuilder {
             passwd: vec![],
             read_only: false,
         };
-        debug!(self.logger, "about to perform handshake");
+        debug!("about to perform handshake");
 
-        let plog = self.logger.clone();
-        let enqueuer = proto::Packetizer::new(addr, stream, plog, default_watcher);
+        let enqueuer = proto::Packetizer::new(addr, stream, default_watcher);
         enqueuer.enqueue(request).await.map(move |response| {
-            trace!(self.logger, "{:?}", response);
+            trace!(?response, "Got response");
             ZooKeeper {
                 connection: enqueuer,
-                logger: self.logger,
             }
         })
     }
@@ -364,6 +348,7 @@ impl ZooKeeper {
     /// calls.
     ///
     /// The maximum allowable size of the data array is 1 MB (1,048,576 bytes).
+    #[instrument(skip(data, acl))]
     pub async fn create<D, A>(
         &self,
         path: &str,
@@ -376,7 +361,7 @@ impl ZooKeeper {
         A: Into<Cow<'static, [Acl]>>,
     {
         let data = data.into();
-        trace!(self.logger, "create"; "path" => path, "mode" => ?mode, "dlen" => data.len());
+        tracing::Span::current().record("dlen", data.len());
         self.connection
             .enqueue(proto::Request::Create {
                 path: path.to_string(),
@@ -398,6 +383,7 @@ impl ZooKeeper {
     /// left by `get_data` calls.
     ///
     /// The maximum allowable size of the data array is 1 MB (1,048,576 bytes).
+    #[instrument(skip(data))]
     pub async fn set_data<D>(
         &self,
         path: &str,
@@ -408,7 +394,7 @@ impl ZooKeeper {
         D: Into<Cow<'static, [u8]>>,
     {
         let data = data.into();
-        trace!(self.logger, "set_data"; "path" => path, "version" => ?version, "dlen" => data.len());
+        tracing::Span::current().record("dlen", data.len());
         let version = version.unwrap_or(-1);
         self.connection
             .enqueue(proto::Request::SetData {
@@ -428,12 +414,12 @@ impl ZooKeeper {
     /// This operation, if successful, will trigger all the watches on the node of the given `path`
     /// left by `exists` API calls, and the watches on the parent node left by `get_children` API
     /// calls.
+    #[instrument]
     pub async fn delete(
         &self,
         path: &str,
         version: Option<i32>,
     ) -> Result<Result<(), error::Delete>, failure::Error> {
-        trace!(self.logger, "delete"; "path" => path, "version" => ?version);
         let version = version.unwrap_or(-1);
         self.connection
             .enqueue(proto::Request::Delete {
@@ -449,11 +435,11 @@ impl ZooKeeper {
     ///
     /// If no node exists for the given path, the returned future resolves with an error of
     /// [`error::GetAcl::NoNode`].
+    #[instrument]
     pub async fn get_acl(
         &self,
         path: &str,
     ) -> Result<Result<(Vec<Acl>, Stat), error::GetAcl>, failure::Error> {
-        trace!(self.logger, "get_acl"; "path" => path);
         self.connection
             .enqueue(proto::Request::GetAcl {
                 path: path.to_string(),
@@ -471,6 +457,7 @@ impl ZooKeeper {
     /// If no node exists for the given path, the returned future resolves with an error of
     /// [`error::SetAcl::NoNode`]. If the given `version` does not match the ACL version, the
     /// returned future resolves with an error of [`error::SetAcl::BadVersion`].
+    #[instrument(skip(acl))]
     pub async fn set_acl<A>(
         &self,
         path: &str,
@@ -480,7 +467,6 @@ impl ZooKeeper {
     where
         A: Into<Cow<'static, [Acl]>>,
     {
-        trace!(self.logger, "set_acl"; "path" => path, "version" => ?version);
         let version = version.unwrap_or(-1);
         self.connection
             .enqueue(proto::Request::SetAcl {
@@ -505,8 +491,8 @@ impl ZooKeeper {
         WithWatcher(self)
     }
 
+    #[instrument]
     async fn exists_w(&self, path: &str, watch: Watch) -> Result<Option<Stat>, failure::Error> {
-        trace!(self.logger, "exists"; "path" => path, "watch" => ?watch);
         self.connection
             .enqueue(proto::Request::Exists {
                 path: path.to_string(),
@@ -521,12 +507,12 @@ impl ZooKeeper {
         self.exists_w(path, Watch::None).await
     }
 
+    #[instrument]
     async fn get_children_w(
         &self,
         path: &str,
         watch: Watch,
     ) -> Result<Option<Vec<String>>, failure::Error> {
-        trace!(self.logger, "get_children"; "path" => path, "watch" => ?watch);
         self.connection
             .enqueue(proto::Request::GetChildren {
                 path: path.to_string(),
@@ -545,12 +531,12 @@ impl ZooKeeper {
         self.get_children_w(path, Watch::None).await
     }
 
+    #[instrument]
     async fn get_data_w(
         &self,
         path: &str,
         watch: Watch,
     ) -> Result<Option<(Vec<u8>, Stat)>, failure::Error> {
-        trace!(self.logger, "get_data"; "path" => path, "watch" => ?watch);
         self.connection
             .enqueue(proto::Request::GetData {
                 path: path.to_string(),
@@ -768,15 +754,18 @@ mod tests {
     use super::*;
 
     use futures::StreamExt;
-    use slog::Drain;
+    use tracing::Level;
+
+    fn init() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(Level::DEBUG)
+            .try_init();
+    }
 
     #[tokio::test]
     async fn it_works() {
-        let mut builder = ZooKeeperBuilder::default();
-        let decorator = slog_term::TermDecorator::new().build();
-        let drain = slog_term::FullFormat::new(decorator).build().fuse();
-        let drain = slog_async::Async::new(drain).build().fuse();
-        builder.set_logger(slog::Logger::root(drain, o!()));
+        init();
+        let builder = ZooKeeperBuilder::default();
 
         let (zk, w) = builder
             .connect(&"127.0.0.1:2181".parse().unwrap())
@@ -973,11 +962,8 @@ mod tests {
 
     #[tokio::test]
     async fn acl_test() {
-        let mut builder = ZooKeeperBuilder::default();
-        let decorator = slog_term::TermDecorator::new().build();
-        let drain = slog_term::FullFormat::new(decorator).build().fuse();
-        let drain = slog_async::Async::new(drain).build().fuse();
-        builder.set_logger(slog::Logger::root(drain, o!()));
+        init();
+        let builder = ZooKeeperBuilder::default();
 
         let (zk, _) = (builder.connect(&"127.0.0.1:2181".parse().unwrap()))
             .await
@@ -1030,11 +1016,8 @@ mod tests {
 
     #[tokio::test]
     async fn multi_test() {
-        let mut builder = ZooKeeperBuilder::default();
-        let decorator = slog_term::TermDecorator::new().build();
-        let drain = slog_term::FullFormat::new(decorator).build().fuse();
-        let drain = slog_async::Async::new(drain).build().fuse();
-        builder.set_logger(slog::Logger::root(drain, o!()));
+        init();
+        let builder = ZooKeeperBuilder::default();
 
         async fn check_exists(zk: &ZooKeeper, paths: &[&str]) -> Result<Vec<bool>, failure::Error> {
             let mut res = Vec::new();
