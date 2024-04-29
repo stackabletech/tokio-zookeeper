@@ -6,7 +6,6 @@ All notable changes to this project will be documented in this file.
 
 ## Changed
 
-- Remove tests for Zookeeper versions `3.5.x` and `3.6.x` as they are EOL ([#40]).
 - Add tests for version `3.9.2` ([#40]).
 
 [#40]: https://github.com/stackabletech/tokio-zookeeper/pull/40
