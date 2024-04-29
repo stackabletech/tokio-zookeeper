@@ -4,12 +4,6 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## Changed
-
-- Add tests for version `3.9.2` ([#40]).
-
-[#40]: https://github.com/stackabletech/tokio-zookeeper/pull/40
-
 ## [0.2.1] - 2023-02-13
 
 ### Changed
