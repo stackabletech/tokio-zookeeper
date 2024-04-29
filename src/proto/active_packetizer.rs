@@ -101,6 +101,7 @@ where
         self.inbox.len() - self.instart
     }
 
+    #[allow(clippy::type_complexity)]
     fn enqueue_impl(
         outbox: &mut Vec<u8>,
         reply: &mut HashMap<i32, (request::OpCode, oneshot::Sender<Result<Response, ZkError>>)>,
