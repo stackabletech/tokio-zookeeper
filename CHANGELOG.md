@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ## Changed
+
 - [BREAKING] Migrated from `slog` to `tracing` ([#40]).
 
 [#40]: https://github.com/stackabletech/tokio-zookeeper/pull/40
