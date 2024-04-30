@@ -497,7 +497,7 @@ impl ZooKeeper {
         WithWatcher(self)
     }
 
-    #[instrument]
+    #[instrument(name = "exists")]
     async fn exists_w(&self, path: &str, watch: Watch) -> Result<Option<Stat>, Whatever> {
         self.connection
             .enqueue(proto::Request::Exists {
@@ -762,7 +762,7 @@ mod tests {
     use futures::StreamExt;
     use tracing::Level;
 
-    fn init() {
+    fn init_tracing_subscriber() {
         let _ = tracing_subscriber::fmt()
             .with_max_level(Level::DEBUG)
             .try_init();

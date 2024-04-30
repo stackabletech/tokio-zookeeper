@@ -325,7 +325,7 @@ where
                         // custom watchers were set by the user -- notify them
                         let mut i = (watchers.len() - 1) as isize;
                         trace!(
-                            watchers = watchers.len(),
+                            watcher_count = watchers.len(),
                             "found potentially waiting custom watchers"
                         );
 
@@ -439,7 +439,7 @@ where
         }
     }
 
-    #[instrument(skip(self, cx, default_watcher))]
+    #[instrument(name = "poll_read", skip(self, cx, default_watcher))]
     pub(super) fn poll(
         mut self: Pin<&mut Self>,
         cx: &mut Context,
