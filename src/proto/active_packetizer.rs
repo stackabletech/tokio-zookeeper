@@ -398,16 +398,16 @@ where
 
                         let _ = tx.send(Err(e));
                     } else {
-                        let mut r = Response::parse(opcode, &mut buf)?;
+                        let mut response = Response::parse(opcode, &mut buf)?;
 
-                        debug!(xid, ?opcode, "handling server response");
+                        debug!(?response, xid, ?opcode, "handling server response");
 
                         if let Response::Connect {
                             timeout,
                             session_id,
                             ref mut password,
                             ..
-                        } = r
+                        } = response
                         {
                             assert!(timeout >= 0);
 
@@ -426,7 +426,7 @@ where
                             mem::swap(this.password, password);
                         }
 
-                        let _ = tx.send(Ok(r)); // if receiver doesn't care, we don't either
+                        let _ = tx.send(Ok(response)); // if receiver doesn't care, we don't either
                     }
                 }
             }
