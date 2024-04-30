@@ -770,7 +770,7 @@ mod tests {
 
     #[tokio::test]
     async fn it_works() {
-        init();
+        init_tracing_subscriber();
         let builder = ZooKeeperBuilder::default();
 
         let (zk, w) = builder
@@ -965,7 +965,7 @@ mod tests {
 
     #[tokio::test]
     async fn acl_test() {
-        init();
+        init_tracing_subscriber();
         let builder = ZooKeeperBuilder::default();
 
         let (zk, _) = (builder.connect(&"127.0.0.1:2181".parse().unwrap()))
@@ -1019,7 +1019,7 @@ mod tests {
 
     #[tokio::test]
     async fn multi_test() {
-        init();
+        init_tracing_subscriber();
         let builder = ZooKeeperBuilder::default();
 
         async fn check_exists(zk: &ZooKeeper, paths: &[&str]) -> Result<Vec<bool>, Whatever> {
