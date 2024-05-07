@@ -7,9 +7,11 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - [BREAKING] Migrated errors from Failure to SNAFU ([#39]).
+- [BREAKING] Migrated from `slog` to `tracing` ([#40]).
 - Updated ZooKeeper versions we test against (now 3.9.2, 3.8.4, 3.7.2, 3.6.4, 3.5.10) ([#39]).
 
 [#39]: https://github.com/stackabletech/tokio-zookeeper/pull/39
+[#40]: https://github.com/stackabletech/tokio-zookeeper/pull/40
 
 ## [0.2.1] - 2023-02-13
 
@@ -35,7 +37,7 @@ now compatible with Rust's async/await syntax!
    [`WithTokio01Executor`](https://github.com/stackabletech/zookeeper-operator/blob/a682dcc3c7dc841917e968ba0e9fa9d33a4fabf5/rust/operator-binary/src/utils.rs#L6-L38)).
 2. Upgrade tokio-zookeeper to v0.2.
 3. Migrate async calls that thread the `ZooKeeper` instance to instead borrow it (for example,
-   `zk.exists(path).and_then(|(zk, stat)| /* do stuff */);` becomes 
+   `zk.exists(path).and_then(|(zk, stat)| /* do stuff */);` becomes
    `let stat = zk.exists(path).await?;`).
 4. Remove Tokio 0.1 and the compatibility wrapper if they are no longer required.
 

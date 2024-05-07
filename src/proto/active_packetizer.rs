@@ -6,7 +6,6 @@ use futures::{
     ready,
 };
 use pin_project::pin_project;
-use slog::{debug, info, trace};
 use snafu::{Snafu, Whatever};
 use std::collections::HashMap;
 use std::{
@@ -17,6 +16,7 @@ use std::{
     time,
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tracing::{debug, info, instrument, trace};
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -124,6 +124,7 @@ where
         self.inbox.len() - self.instart
     }
 
+    #[allow(clippy::type_complexity)]
     fn enqueue_impl(
         outbox: &mut Vec<u8>,
         reply: &mut HashMap<i32, (request::OpCode, ReplySender)>,
@@ -181,11 +182,11 @@ where
         Self::enqueue_impl(&mut self.outbox, &mut self.reply, xid, item, tx)
     }
 
+    #[instrument(skip(self, cx))]
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context,
         exiting: bool,
-        logger: &mut slog::Logger,
     ) -> Poll<Result<(), Error>>
     where
         S: AsyncWrite,
@@ -208,7 +209,7 @@ where
         let mut this = self.project();
         if wrote {
             // heartbeat is since last write traffic!
-            trace!(logger, "resetting heartbeat timer");
+            trace!("resetting heartbeat timer");
             this.timer
                 .reset(tokio::time::Instant::now() + *this.timeout);
         }
@@ -216,18 +217,18 @@ where
         ready!(this.stream.as_mut().poll_flush(cx)?);
 
         if exiting {
-            debug!(logger, "shutting down writer");
+            debug!("shutting down writer");
             ready!(this.stream.poll_shutdown(cx)?);
         }
 
         Poll::Ready(Ok(()))
     }
 
+    #[instrument(skip(self, cx, default_watcher))]
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context,
         default_watcher: &mut mpsc::UnboundedSender<WatchedEvent>,
-        logger: &mut slog::Logger,
     ) -> Poll<Result<(), Error>>
     where
         S: AsyncRead,
@@ -239,7 +240,7 @@ where
             } else {
                 4
             };
-            trace!(logger, "need {} bytes, have {}", need, self.inlen());
+            trace!("need {need} bytes, have {inlen}", inlen = self.inlen());
 
             while self.inlen() < need {
                 let this = self.as_mut().project();
@@ -260,7 +261,7 @@ where
                                 );
                             } else {
                                 // Server closed session with no bytes left in buffer
-                                debug!(logger, "server closed connection");
+                                debug!("server closed connection");
                                 return Poll::Ready(Ok(()));
                             }
                         }
@@ -292,10 +293,8 @@ where
                     let zxid = buf.read_i64::<BigEndian>()?;
                     if zxid > 0 {
                         trace!(
-                            logger,
-                            "updated zxid from {} to {}",
-                            *this.last_zxid_seen,
-                            zxid
+                            "updated zxid from {last_zxid_seen} to {zxid}",
+                            last_zxid_seen = *this.last_zxid_seen
                         );
 
                         assert!(zxid >= *this.last_zxid_seen);
@@ -311,7 +310,7 @@ where
                 if xid == 0 && !*this.first {
                     // response to shutdown -- empty response
                     // XXX: in theory, server should now shut down receive end
-                    trace!(logger, "got response to CloseSession");
+                    trace!("got response to CloseSession");
                     if let Some(e) = err {
                         return Poll::Ready(CloseSessionSnafu { error_code: e }.fail());
                     }
@@ -319,15 +318,15 @@ where
                     // watch event
                     use super::response::ReadFrom;
                     let e = WatchedEvent::read_from(&mut buf)?;
-                    trace!(logger, "got watcher event {:?}", e);
+                    trace!(event = ?e, "got watcher event");
 
                     let mut remove = false;
                     if let Some(watchers) = this.watchers.get_mut(&e.path) {
                         // custom watchers were set by the user -- notify them
                         let mut i = (watchers.len() - 1) as isize;
-                        trace!(logger,
-                               "found potentially waiting custom watchers";
-                               "n" => watchers.len()
+                        trace!(
+                            watcher_count = watchers.len(),
+                            "found potentially waiting custom watchers"
                         );
 
                         while i >= 0 {
@@ -366,7 +365,7 @@ where
                     let _ = default_watcher.unbounded_send(e);
                 } else if xid == -2 {
                     // response to ping -- empty response
-                    trace!(logger, "got response to heartbeat");
+                    trace!("got response to heartbeat");
                     if let Some(e) = err {
                         return Poll::Ready(BadPingSnafu { error_code: e }.fail());
                     }
@@ -383,41 +382,41 @@ where
                         if err.is_none()
                             || (opcode == request::OpCode::Exists && err == Some(ZkError::NoNode))
                         {
-                            trace!(logger, "pending watcher turned into real watcher"; "xid" => xid);
+                            trace!(xid, "pending watcher turned into real watcher");
                             this.watchers.entry(w.0).or_default().push((w.1, w.2));
                         } else {
-                            trace!(logger,
-                                   "pending watcher not turned into real watcher: {:?}",
-                                   err;
-                                   "xid" => xid
+                            trace!(
+                                xid,
+                                error = ?err,
+                                "pending watcher not turned into real watcher"
                             );
                         }
                     }
 
                     if let Some(e) = err {
-                        info!(logger,
-                               "handling server error response: {:?}", e;
-                               "xid" => xid, "opcode" => ?opcode);
+                        info!(xid, ?opcode, error = ?e, "handling server error response");
 
                         let _ = tx.send(Err(e));
                     } else {
-                        let mut r = Response::parse(opcode, &mut buf)?;
+                        let mut response = Response::parse(opcode, &mut buf)?;
 
-                        debug!(logger,
-                               "handling server response: {:?}", r;
-                               "xid" => xid, "opcode" => ?opcode);
+                        debug!(?response, xid, ?opcode, "handling server response");
 
                         if let Response::Connect {
                             timeout,
                             session_id,
                             ref mut password,
                             ..
-                        } = r
+                        } = response
                         {
                             assert!(timeout >= 0);
-                            trace!(logger, "negotiated session timeout: {}ms", timeout);
 
                             *this.timeout = time::Duration::from_millis(2 * timeout as u64 / 3);
+                            trace!(
+                                timeout = ?this.timeout,
+                                "negotiated session timeout",
+                            );
+
                             this.timer
                                 .as_mut()
                                 .reset(tokio::time::Instant::now() + *this.timeout);
@@ -427,7 +426,7 @@ where
                             mem::swap(this.password, password);
                         }
 
-                        let _ = tx.send(Ok(r)); // if receiver doesn't care, we don't either
+                        let _ = tx.send(Ok(response)); // if receiver doesn't care, we don't either
                     }
                 }
             }
@@ -440,15 +439,14 @@ where
         }
     }
 
+    #[instrument(name = "poll_read", skip(self, cx, default_watcher))]
     pub(super) fn poll(
         mut self: Pin<&mut Self>,
         cx: &mut Context,
         exiting: bool,
-        logger: &mut slog::Logger,
         default_watcher: &mut mpsc::UnboundedSender<WatchedEvent>,
     ) -> Poll<Result<(), Error>> {
-        trace!(logger, "poll_read");
-        let r = self.as_mut().poll_read(cx, default_watcher, logger)?;
+        let r = self.as_mut().poll_read(cx, default_watcher)?;
 
         let mut this = self.as_mut().project();
         if let Poll::Ready(()) = this.timer.as_mut().poll(cx) {
@@ -466,7 +464,7 @@ where
                 this.outbox
                     .write_i32::<BigEndian>(request::OpCode::Ping as i32)
                     .expect("Vec::write should never fail");
-                trace!(logger, "sending heartbeat");
+                trace!("sending heartbeat");
             } else {
                 // already request in flight, so no need to also send heartbeat
             }
@@ -476,12 +474,11 @@ where
                 .reset(tokio::time::Instant::now() + *this.timeout);
         }
 
-        trace!(logger, "poll_read");
-        let w = self.poll_write(cx, exiting, logger)?;
+        let w = self.poll_write(cx, exiting)?;
 
         match (r, w) {
             (Poll::Ready(()), Poll::Ready(())) if exiting => {
-                debug!(logger, "packetizer done");
+                debug!("packetizer done");
                 Poll::Ready(Ok(()))
             }
             (Poll::Ready(()), Poll::Ready(())) => Poll::Ready(ServerClosedConnectionSnafu.fail()),

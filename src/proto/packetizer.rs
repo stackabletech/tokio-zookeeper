@@ -10,7 +10,6 @@ use futures::{
     ready, FutureExt, StreamExt, TryFutureExt,
 };
 use pin_project::pin_project;
-use slog::{debug, error, info, trace};
 use snafu::{ResultExt, Whatever};
 use std::{
     future::{self, Future},
@@ -19,6 +18,7 @@ use std::{
     task::{Context, Poll},
 };
 use tokio::io::{AsyncRead, AsyncWrite};
+use tracing::{debug, error, info, instrument, trace};
 
 #[pin_project]
 pub(crate) struct Packetizer<S>
@@ -41,8 +41,6 @@ where
     /// Next xid to issue
     xid: i32,
 
-    logger: slog::Logger,
-
     exiting: bool,
 }
 
@@ -55,7 +53,6 @@ where
     pub(crate) fn new(
         addr: S::Addr,
         stream: S,
-        log: slog::Logger,
         default_watcher: mpsc::UnboundedSender<WatchedEvent>,
     ) -> Enqueuer
     where
@@ -63,7 +60,6 @@ where
     {
         let (tx, rx) = mpsc::unbounded();
 
-        let exitlogger = log.clone();
         tokio::spawn(
             Packetizer {
                 addr,
@@ -71,12 +67,11 @@ where
                 xid: 0,
                 default_watcher,
                 rx,
-                logger: log,
                 exiting: false,
             }
-            .map_err(move |e| {
-                error!(exitlogger, "packetizer exiting: {:?}", e);
-                drop(e);
+            .map_err(move |error| {
+                error!(%error, "packetizer exiting");
+                drop(error);
             }),
         );
 
@@ -100,14 +95,13 @@ where
         mut self: Pin<&mut Self>,
         cx: &mut Context,
         exiting: bool,
-        logger: &mut slog::Logger,
         default_watcher: &mut mpsc::UnboundedSender<WatchedEvent>,
     ) -> Poll<Result<(), Whatever>> {
         let ap = match self.as_mut().project() {
             PacketizerStateProj::Connected(ref mut ap) => {
                 return ap
                     .as_mut()
-                    .poll(cx, exiting, logger, default_watcher)
+                    .poll(cx, exiting, default_watcher)
                     .map(|res| res.whatever_context("active packetizer failed"))
             }
             PacketizerStateProj::Reconnecting(ref mut c) => ready!(c.as_mut().poll(cx)?),
@@ -115,7 +109,7 @@ where
 
         // we are now connected!
         self.set(PacketizerState::Connected(ap));
-        self.poll(cx, exiting, logger, default_watcher)
+        self.poll(cx, exiting, default_watcher)
     }
 }
 
@@ -123,6 +117,7 @@ impl<S> Packetizer<S>
 where
     S: ZooKeeperTransport,
 {
+    #[instrument(skip(self, cx))]
     fn poll_enqueue(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), ()>> {
         let mut this = self.project();
         while let PacketizerStateProj::Connected(ref mut ap) = this.state.as_mut().project() {
@@ -130,7 +125,7 @@ where
                 Some((request, response)) => (request, response),
                 None => return Poll::Ready(Err(())),
             };
-            debug!(this.logger, "enqueueing request {:?}", item; "xid" => *this.xid);
+            debug!(?item, xid = this.xid, "enqueueing request");
 
             match item {
                 Request::GetData {
@@ -158,13 +153,7 @@ where
                                 Request::Exists { .. } => WatchType::Exist,
                                 _ => unreachable!(),
                             };
-                            trace!(
-                                this.logger,
-                                "adding pending watcher";
-                                "xid" => *this.xid,
-                                "path" => path,
-                                "wtype" => ?wtype
-                            );
+                            trace!(xid = this.xid, path, ?wtype, "adding pending watcher");
                             ap.as_mut()
                                 .pending_watchers()
                                 .insert(*this.xid, (path.to_string(), w, wtype));
@@ -189,10 +178,9 @@ where
 {
     type Output = Result<(), Whatever>;
 
+    #[instrument(skip(self, cx))]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        trace!(self.logger, "packetizer polled");
         if !self.exiting {
-            trace!(self.logger, "poll_enqueue");
             match self.as_mut().poll_enqueue(cx) {
                 Poll::Ready(Ok(())) | Poll::Pending => {}
                 Poll::Ready(Err(())) => {
@@ -228,7 +216,7 @@ where
         match this
             .state
             .as_mut()
-            .poll(cx, *this.exiting, this.logger, this.default_watcher)
+            .poll(cx, *this.exiting, this.default_watcher)
         {
             Poll::Ready(Ok(v)) => Poll::Ready(Ok(v)),
             Poll::Pending => Poll::Pending,
@@ -246,7 +234,7 @@ where
                     };
 
                 if *this.exiting {
-                    debug!(this.logger, "connection lost during exit; not reconnecting");
+                    debug!("connection lost during exit; not reconnecting");
                     Poll::Ready(Ok(()))
                 } else if let PacketizerState::Connected(ActivePacketizer {
                     last_zxid_seen,
@@ -254,15 +242,15 @@ where
                     ..
                 }) = *this.state
                 {
-                    info!(this.logger, "connection lost; reconnecting";
-                          "session_id" => session_id,
-                          "last_zxid" => last_zxid_seen
+                    info!(
+                        session_id,
+                        last_zxid = last_zxid_seen,
+                        "connection lost; reconnecting"
                     );
 
                     let xid = *this.xid;
                     *this.xid += 1;
 
-                    let log = this.logger.clone();
                     let retry = S::connect(this.addr.clone())
                         .map(|res| res.whatever_context("failed to connect"))
                         .map_ok(move |stream| {
@@ -274,11 +262,11 @@ where
                                 passwd: password,
                                 read_only: false,
                             };
-                            trace!(log, "about to handshake (again)");
+                            trace!("about to handshake (again)");
 
                             let (tx, rx) = oneshot::channel();
                             tokio::spawn(rx.map(move |r| {
-                                trace!(log, "re-connection response: {:?}", r);
+                                trace!(response = ?r, "re-connection response");
                             }));
 
                             let mut ap = ActivePacketizer::new(stream);
