@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2024-05-07
+
 ### Changed
 
 - [BREAKING] Migrated errors from Failure to SNAFU ([#39]).
