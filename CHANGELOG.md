@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.0] - 2024-05-08
+
 ### Changed
 
 - [BREAKING] Replace `snafu::Whatever` types with `tokio_zookeeper::error::Error` ([#44]).
