@@ -19,7 +19,7 @@ pub(crate) use self::watch::Watch;
 #[async_trait]
 pub trait ZooKeeperTransport: AsyncRead + AsyncWrite + Sized + Send + 'static {
     type Addr: Send + Clone;
-    type ConnectError: Error + 'static;
+    type ConnectError: Error + Send + Sync + 'static;
     async fn connect(addr: Self::Addr) -> Result<Self, Self::ConnectError>;
 }
 

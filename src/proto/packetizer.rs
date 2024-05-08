@@ -2,7 +2,7 @@ use super::{
     active_packetizer::ActivePacketizer, request, watch::WatchType, Request, Response,
     ZooKeeperTransport,
 };
-use crate::{format_err, Watch, WatchedEvent, ZkError};
+use crate::{error::Error, format_err, Watch, WatchedEvent, ZkError};
 use byteorder::{BigEndian, WriteBytesExt};
 use futures::{
     channel::{mpsc, oneshot},
@@ -10,7 +10,7 @@ use futures::{
     ready, FutureExt, StreamExt, TryFutureExt,
 };
 use pin_project::pin_project;
-use snafu::{ResultExt, Whatever};
+use snafu::ResultExt;
 use std::{
     future::{self, Future},
     mem,
@@ -83,7 +83,7 @@ where
 enum PacketizerState<S> {
     Connected(#[pin] ActivePacketizer<S>),
     Reconnecting(
-        Pin<Box<dyn Future<Output = Result<ActivePacketizer<S>, Whatever>> + Send + 'static>>,
+        Pin<Box<dyn Future<Output = Result<ActivePacketizer<S>, Error>> + Send + 'static>>,
     ),
 }
 
@@ -96,7 +96,7 @@ where
         cx: &mut Context,
         exiting: bool,
         default_watcher: &mut mpsc::UnboundedSender<WatchedEvent>,
-    ) -> Poll<Result<(), Whatever>> {
+    ) -> Poll<Result<(), Error>> {
         let ap = match self.as_mut().project() {
             PacketizerStateProj::Connected(ref mut ap) => {
                 return ap
@@ -176,7 +176,7 @@ impl<S> Future for Packetizer<S>
 where
     S: ZooKeeperTransport,
 {
-    type Output = Result<(), Whatever>;
+    type Output = Result<(), Error>;
 
     #[instrument(skip(self, cx))]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
@@ -295,7 +295,7 @@ impl Enqueuer {
     pub(crate) fn enqueue(
         &self,
         request: Request,
-    ) -> impl Future<Output = Result<Result<Response, ZkError>, Whatever>> {
+    ) -> impl Future<Output = Result<Result<Response, ZkError>, Error>> {
         let (tx, rx) = oneshot::channel();
         match self.0.unbounded_send((request, tx)) {
             Ok(()) => {
