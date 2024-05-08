@@ -1,11 +1,14 @@
-use snafu::{whatever as bail, Whatever};
+use snafu::whatever as bail;
 
-use crate::proto::{Request, Response, ZkError};
-use crate::{error, Acl, MultiResponse, Stat};
+use crate::{
+    error::{self, Error},
+    proto::{Request, Response, ZkError},
+    Acl, MultiResponse, Stat,
+};
 
 pub(crate) fn create(
     res: Result<Response, ZkError>,
-) -> Result<Result<String, error::Create>, Whatever> {
+) -> Result<Result<String, error::Create>, Error> {
     match res {
         Ok(Response::String(s)) => Ok(Ok(s)),
         Ok(r) => bail!("got non-string response to create: {:?}", r),
@@ -20,7 +23,7 @@ pub(crate) fn create(
 pub(crate) fn set_data(
     version: i32,
     res: Result<Response, ZkError>,
-) -> Result<Result<Stat, error::SetData>, Whatever> {
+) -> Result<Result<Stat, error::SetData>, Error> {
     match res {
         Ok(Response::Stat(stat)) => Ok(Ok(stat)),
         Ok(r) => bail!("got a non-stat response to a set_data request: {:?}", r),
@@ -34,7 +37,7 @@ pub(crate) fn set_data(
 pub(crate) fn delete(
     version: i32,
     res: Result<Response, ZkError>,
-) -> Result<Result<(), error::Delete>, Whatever> {
+) -> Result<Result<(), error::Delete>, Error> {
     match res {
         Ok(Response::Empty) => Ok(Ok(())),
         Ok(r) => bail!("got non-empty response to delete: {:?}", r),
@@ -47,7 +50,7 @@ pub(crate) fn delete(
 
 pub(crate) fn get_acl(
     res: Result<Response, ZkError>,
-) -> Result<Result<(Vec<Acl>, Stat), error::GetAcl>, Whatever> {
+) -> Result<Result<(Vec<Acl>, Stat), error::GetAcl>, Error> {
     match res {
         Ok(Response::GetAcl { acl, stat }) => Ok(Ok((acl, stat))),
         Ok(r) => bail!("got non-acl response to a get_acl request: {:?}", r),
@@ -59,7 +62,7 @@ pub(crate) fn get_acl(
 pub(crate) fn set_acl(
     version: i32,
     res: Result<Response, ZkError>,
-) -> Result<Result<Stat, error::SetAcl>, Whatever> {
+) -> Result<Result<Stat, error::SetAcl>, Error> {
     match res {
         Ok(Response::Stat(stat)) => Ok(Ok(stat)),
         Ok(r) => bail!("got non-stat response to a set_acl request: {:?}", r),
@@ -71,7 +74,7 @@ pub(crate) fn set_acl(
     }
 }
 
-pub(crate) fn exists(res: Result<Response, ZkError>) -> Result<Option<Stat>, Whatever> {
+pub(crate) fn exists(res: Result<Response, ZkError>) -> Result<Option<Stat>, Error> {
     match res {
         Ok(Response::Stat(stat)) => Ok(Some(stat)),
         Ok(r) => bail!("got a non-create response to a create request: {:?}", r),
@@ -80,9 +83,7 @@ pub(crate) fn exists(res: Result<Response, ZkError>) -> Result<Option<Stat>, Wha
     }
 }
 
-pub(crate) fn get_children(
-    res: Result<Response, ZkError>,
-) -> Result<Option<Vec<String>>, Whatever> {
+pub(crate) fn get_children(res: Result<Response, ZkError>) -> Result<Option<Vec<String>>, Error> {
     match res {
         Ok(Response::Strings(children)) => Ok(Some(children)),
         Ok(r) => bail!("got non-strings response to get-children: {:?}", r),
@@ -91,9 +92,7 @@ pub(crate) fn get_children(
     }
 }
 
-pub(crate) fn get_data(
-    res: Result<Response, ZkError>,
-) -> Result<Option<(Vec<u8>, Stat)>, Whatever> {
+pub(crate) fn get_data(res: Result<Response, ZkError>) -> Result<Option<(Vec<u8>, Stat)>, Error> {
     match res {
         Ok(Response::GetData { bytes, stat }) => Ok(Some((bytes, stat))),
         Ok(r) => bail!("got non-data response to get-data: {:?}", r),
@@ -105,7 +104,7 @@ pub(crate) fn get_data(
 pub(crate) fn check(
     version: i32,
     res: Result<Response, ZkError>,
-) -> Result<Result<(), error::Check>, Whatever> {
+) -> Result<Result<(), error::Check>, Error> {
     match res {
         Ok(Response::Empty) => Ok(Ok(())),
         Ok(r) => bail!("got a non-check response to a check request: {:?}", r),
@@ -146,7 +145,7 @@ impl From<&Request> for RequestMarker {
 pub(crate) fn multi(
     req: &RequestMarker,
     res: Result<Response, ZkError>,
-) -> Result<Result<MultiResponse, error::Multi>, Whatever> {
+) -> Result<Result<MultiResponse, error::Multi>, Error> {
     // Handle multi-specific errors.
     match res {
         Err(ZkError::Ok) => return Ok(Err(error::Multi::RolledBack)),

@@ -1,12 +1,12 @@
 use super::{request, watch::WatchType, Request, Response};
-use crate::{WatchedEvent, WatchedEventType, ZkError};
+use crate::{error::Error as DynError, WatchedEvent, WatchedEventType, ZkError};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use futures::{
     channel::{mpsc, oneshot},
     ready,
 };
 use pin_project::pin_project;
-use snafu::{Snafu, Whatever};
+use snafu::Snafu;
 use std::collections::HashMap;
 use std::{
     future::Future,
@@ -23,7 +23,7 @@ pub enum Error {
     #[snafu(transparent)]
     Io { source: std::io::Error },
     #[snafu(transparent)]
-    Whatever { source: Whatever },
+    Whatever { source: DynError },
 
     #[snafu(display("connection closed with {len} bytes left in buffer: {buf:x?}", len = buf.len()))]
     ConnectionClosed { buf: Vec<u8> },

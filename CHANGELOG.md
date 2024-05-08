@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- [BREAKING] Replace `snafu::Whatever` types with `tokio_zookeeper::error::Error` ([#44]).
+
+### Bugfixes
+
+- Errors are now thread-safe (`Send + Sync`) again ([#44]).
+
 ## [0.3.0] - 2024-05-07
 
 ### Changed
@@ -14,6 +22,7 @@ All notable changes to this project will be documented in this file.
 
 [#39]: https://github.com/stackabletech/tokio-zookeeper/pull/39
 [#40]: https://github.com/stackabletech/tokio-zookeeper/pull/40
+[#44]: https://github.com/stackabletech/tokio-zookeeper/pull/44
 
 ## [0.2.1] - 2023-02-13
 
