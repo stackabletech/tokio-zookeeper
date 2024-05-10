@@ -18,7 +18,7 @@ jobs:
         zookeeper: [3.9.2, 3.8.4, 3.7.2, 3.6.4, 3.5.10]
     steps:
       - name: Check out repository code
-        uses: actions/checkout@v3
+        uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3.6.0
       - run: rustup default ${{ matrix.rust }}
       - run: wget -O zookeeper.tar.gz https://archive.apache.org/dist/zookeeper/zookeeper-${{ matrix.zookeeper }}/apache-zookeeper-${{ matrix.zookeeper }}-bin.tar.gz
       - run: mkdir zookeeper
