@@ -1,13 +1,14 @@
 use super::{
-    active_packetizer::ActivePacketizer, request, watch::WatchType, Request, Response,
-    ZooKeeperTransport,
+    Request, Response, ZooKeeperTransport, active_packetizer::ActivePacketizer, request,
+    watch::WatchType,
 };
-use crate::{error::Error, format_err, Watch, WatchedEvent, ZkError};
+use crate::{Watch, WatchedEvent, ZkError, error::Error, format_err};
 use byteorder::{BigEndian, WriteBytesExt};
 use futures::{
+    FutureExt, StreamExt, TryFutureExt,
     channel::{mpsc, oneshot},
     future::Either,
-    ready, FutureExt, StreamExt, TryFutureExt,
+    ready,
 };
 use pin_project::pin_project;
 use snafu::ResultExt;
@@ -79,6 +80,8 @@ where
     }
 }
 
+// clippy suggests wrapping the `Connected` payload in a Box, but I was not able to achieve this
+#[allow(clippy::large_enum_variant)]
 #[pin_project(project = PacketizerStateProj)]
 enum PacketizerState<S> {
     Connected(#[pin] ActivePacketizer<S>),
@@ -102,7 +105,7 @@ where
                 return ap
                     .as_mut()
                     .poll(cx, exiting, default_watcher)
-                    .map(|res| res.whatever_context("active packetizer failed"))
+                    .map(|res| res.whatever_context("active packetizer failed"));
             }
             PacketizerStateProj::Reconnecting(ref mut c) => ready!(c.as_mut().poll(cx)?),
         };

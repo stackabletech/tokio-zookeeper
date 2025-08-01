@@ -1,9 +1,9 @@
 use snafu::whatever as bail;
 
 use crate::{
+    Acl, MultiResponse, Stat,
     error::{self, Error},
     proto::{Request, Response, ZkError},
-    Acl, MultiResponse, Stat,
 };
 
 pub(crate) fn create(

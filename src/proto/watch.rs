@@ -10,11 +10,7 @@ pub(crate) enum Watch {
 
 impl Watch {
     pub(crate) fn to_u8(&self) -> u8 {
-        if let Watch::None = *self {
-            0
-        } else {
-            1
-        }
+        if let Watch::None = *self { 0 } else { 1 }
     }
 }
 

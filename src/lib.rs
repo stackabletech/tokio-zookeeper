@@ -105,7 +105,8 @@
 //!
 //! # #[tokio::main(flavor = "current_thread")]
 //! # async fn main() {
-//! let (zk, default_watcher) = ZooKeeper::connect(&"127.0.0.1:2181".parse().unwrap())
+//! let connect_addr = "127.0.0.1:2181".parse().unwrap();
+//! let (zk, default_watcher) = ZooKeeper::connect(&connect_addr)
 //!     .await
 //!     .unwrap();
 //!
@@ -193,8 +194,8 @@
 #![deny(missing_copy_implementations)]
 
 use error::Error;
-use futures::{channel::oneshot, Stream};
-use snafu::{whatever as bail, ResultExt};
+use futures::{Stream, channel::oneshot};
+use snafu::{ResultExt, whatever as bail};
 use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::time;
@@ -766,10 +767,8 @@ mod tests {
         init_tracing_subscriber();
         let builder = ZooKeeperBuilder::default();
 
-        let (zk, w) = builder
-            .connect(&"127.0.0.1:2181".parse().unwrap())
-            .await
-            .unwrap();
+        let connect_addr = "127.0.0.1:2181".parse().unwrap();
+        let (zk, w) = builder.connect(&connect_addr).await.unwrap();
         let (exists_w, stat) = zk.with_watcher().exists("/foo").await.unwrap();
         assert_eq!(stat, None);
         let stat = zk.watch().exists("/foo").await.unwrap();
@@ -874,9 +873,8 @@ mod tests {
 
     #[tokio::test]
     async fn example() {
-        let (zk, default_watcher) = ZooKeeper::connect(&"127.0.0.1:2181".parse().unwrap())
-            .await
-            .unwrap();
+        let connect_addr = "127.0.0.1:2181".parse().unwrap();
+        let (zk, default_watcher) = ZooKeeper::connect(&connect_addr).await.unwrap();
 
         // let's first check if /example exists. the .watch() causes us to be notified
         // the next time the "exists" status of /example changes after the call.
