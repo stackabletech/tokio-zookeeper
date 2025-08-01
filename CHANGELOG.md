@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 
 - Upgrade all dependencies to their latest versions ([#53]).
 - Remove the `once_cell` and `async-trait` dependencies, as they are now covered by `std` ([#53]).
+- Bump to Rust 2024 edition ([#53]).
 - Added Zookeeper 3.9.3 to the list of versions we test against ([#53]).
 
 [#53]: https://github.com/stackabletech/tokio-zookeeper/pull/53
