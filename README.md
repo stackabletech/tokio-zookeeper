@@ -192,6 +192,11 @@ assert_eq!(
 );
 ```
 
+# Testing
+
+1. Start a Zookeeper instance, e.g. using `docker run -p 2181:2181 zookeeper`
+2. Run `cargo test`
+
 # Thank you
 
 This crate was originally developed by [Jon Gjengset (@jonhoo)](https://github.com/jonhoo/) as part of
