@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Upgrade all dependencies to their latest version ([#53]).
+- Remove the `once_cell` and `async-trait` dependencies, as they are now covered by `std` ([#53]).
+- Added Zookeeper 3.9.3 to the list of versions we test against ([#53]).
+
+[#53]: https://github.com/stackabletech/tokio-zookeeper/pull/53
+
 ## [0.4.0] - 2024-05-08
 
 ### Changed
