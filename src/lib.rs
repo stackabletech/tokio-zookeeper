@@ -489,13 +489,13 @@ impl ZooKeeper {
 
 impl ZooKeeper {
     /// Add a global watch for the next chained operation.
-    pub fn watch(&self) -> WatchGlobally {
+    pub fn watch(&self) -> WatchGlobally<'_> {
         WatchGlobally(self)
     }
 
     /// Add a watch for the next chained operation, and return a future for any received event
     /// along with the operation's (successful) result.
-    pub fn with_watcher(&self) -> WithWatcher {
+    pub fn with_watcher(&self) -> WithWatcher<'_> {
         WithWatcher(self)
     }
 
@@ -554,7 +554,7 @@ impl ZooKeeper {
 
     /// Start building a multi request. Multi requests batch several operations
     /// into one atomic unit.
-    pub fn multi(&self) -> MultiBuilder {
+    pub fn multi(&self) -> MultiBuilder<'_> {
         MultiBuilder {
             zk: self,
             requests: Vec::new(),
@@ -645,7 +645,7 @@ impl<'a> WithWatcher<'a> {
         self.0
             .get_children_w(path, Watch::Custom(tx))
             .await
-            .map(|r| (r.map(move |c| (rx, c))))
+            .map(|r| r.map(move |c| (rx, c)))
     }
 
     /// Return the data and the [`Stat`] of the node at the given `path`, or `None` if it does not
@@ -662,7 +662,7 @@ impl<'a> WithWatcher<'a> {
         self.0
             .get_data_w(path, Watch::Custom(tx))
             .await
-            .map(|r| (r.map(move |(b, s)| (rx, b, s))))
+            .map(|r| r.map(move |(b, s)| (rx, b, s)))
     }
 }
 
