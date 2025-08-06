@@ -1,5 +1,5 @@
-use super::{request, watch::WatchType, Request, Response};
-use crate::{error::Error as DynError, WatchedEvent, WatchedEventType, ZkError};
+use super::{Request, Response, request, watch::WatchType};
+use crate::{WatchedEvent, WatchedEventType, ZkError, error::Error as DynError};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use futures::{
     channel::{mpsc, oneshot},
@@ -194,10 +194,11 @@ where
         let mut wrote = false;
         while self.outlen() != 0 {
             let mut this = self.as_mut().project();
-            let n = ready!(this
-                .stream
-                .as_mut()
-                .poll_write(cx, &this.outbox[*this.outstart..])?);
+            let n = ready!(
+                this.stream
+                    .as_mut()
+                    .poll_write(cx, &this.outbox[*this.outstart..])?
+            );
             wrote = true;
             *this.outstart += n;
             if *this.outstart == this.outbox.len() {

@@ -2,8 +2,7 @@ use std::fmt;
 use std::ops;
 
 use std::string::ToString;
-
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 
 /// Describes the ability of a user to perform a certain action.
 ///
@@ -189,11 +188,12 @@ impl Acl {
     }
 }
 
-static ACL_CREATOR_ALL: Lazy<[Acl; 1]> = Lazy::new(|| [Acl::new(Permission::ALL, "auth", "")]);
-static ACL_OPEN_UNSAFE: Lazy<[Acl; 1]> =
-    Lazy::new(|| [Acl::new(Permission::ALL, "world", "anyone")]);
-static ACL_READ_UNSAFE: Lazy<[Acl; 1]> =
-    Lazy::new(|| [Acl::new(Permission::READ, "world", "anyone")]);
+static ACL_CREATOR_ALL: LazyLock<[Acl; 1]> =
+    LazyLock::new(|| [Acl::new(Permission::ALL, "auth", "")]);
+static ACL_OPEN_UNSAFE: LazyLock<[Acl; 1]> =
+    LazyLock::new(|| [Acl::new(Permission::ALL, "world", "anyone")]);
+static ACL_READ_UNSAFE: LazyLock<[Acl; 1]> =
+    LazyLock::new(|| [Acl::new(Permission::READ, "world", "anyone")]);
 
 impl fmt::Display for Acl {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
