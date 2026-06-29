@@ -23,6 +23,8 @@ jobs:
     steps:
       - name: Check out repository code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
       - run: rustup default ${{ matrix.rust }}
       - run: wget -O zookeeper.tar.gz https://archive.apache.org/dist/zookeeper/zookeeper-${{ matrix.zookeeper }}/apache-zookeeper-${{ matrix.zookeeper }}-bin.tar.gz
       - run: mkdir zookeeper
