@@ -9,9 +9,13 @@ on:
   pull_request:
   merge_group:
 
+permissions: {}
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       matrix:
         rust: [stable, beta, nightly]
