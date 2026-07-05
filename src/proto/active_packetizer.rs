@@ -229,7 +229,7 @@ where
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context,
-        default_watcher: &mut mpsc::UnboundedSender<WatchedEvent>,
+        default_watcher: &mut Option<mpsc::UnboundedSender<WatchedEvent>>,
     ) -> Poll<Result<(), Error>>
     where
         S: AsyncRead,
@@ -362,8 +362,11 @@ where
                             .expect("tried to remove watcher that didn't exist");
                     }
 
-                    // NOTE: ignoring error, because the user may not care about events
-                    let _ = default_watcher.unbounded_send(e);
+                    // Handle optional watcher stream for connect_without_watcher
+                    if let Some(w) = &default_watcher {
+                        // NOTE: ignoring error, because the user may not care about events
+                        let _ = w.unbounded_send(e);
+                    }
                 } else if xid == -2 {
                     // response to ping -- empty response
                     trace!("got response to heartbeat");
@@ -445,7 +448,7 @@ where
         mut self: Pin<&mut Self>,
         cx: &mut Context,
         exiting: bool,
-        default_watcher: &mut mpsc::UnboundedSender<WatchedEvent>,
+        default_watcher: &mut Option<mpsc::UnboundedSender<WatchedEvent>>,
     ) -> Poll<Result<(), Error>> {
         let r = self.as_mut().poll_read(cx, default_watcher)?;
 

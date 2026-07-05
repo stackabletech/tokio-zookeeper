@@ -34,7 +34,7 @@ where
     state: PacketizerState<S>,
 
     /// Watcher to send watch events to.
-    default_watcher: mpsc::UnboundedSender<WatchedEvent>,
+    default_watcher: Option<mpsc::UnboundedSender<WatchedEvent>>,
 
     /// Incoming requests
     rx: mpsc::UnboundedReceiver<(Request, oneshot::Sender<Result<Response, ZkError>>)>,
@@ -54,7 +54,7 @@ where
     pub(crate) fn new(
         addr: S::Addr,
         stream: S,
-        default_watcher: mpsc::UnboundedSender<WatchedEvent>,
+        default_watcher: Option<mpsc::UnboundedSender<WatchedEvent>>,
     ) -> Enqueuer
     where
         S: Send + 'static + AsyncRead + AsyncWrite,
@@ -98,7 +98,7 @@ where
         mut self: Pin<&mut Self>,
         cx: &mut Context,
         exiting: bool,
-        default_watcher: &mut mpsc::UnboundedSender<WatchedEvent>,
+        default_watcher: &mut Option<mpsc::UnboundedSender<WatchedEvent>>,
     ) -> Poll<Result<(), Error>> {
         let ap = match self.as_mut().project() {
             PacketizerStateProj::Connected(ref mut ap) => {

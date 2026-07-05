@@ -281,7 +281,18 @@ impl ZooKeeperBuilder {
         let stream = tokio::net::TcpStream::connect(addr)
             .await
             .whatever_context("connect failed")?;
-        Ok((self.handshake(*addr, stream, tx).await?, rx))
+        Ok((self.handshake(*addr, stream, Some(tx)).await?, rx))
+    }
+
+    /// Connect to a ZooKeeper server instance at the given address, but without returning a
+    /// watcher stream.
+    ///
+    /// See [`ZooKeeperBuilder::connect_without_watcher`].
+    pub async fn connect_without_watcher(self, addr: &SocketAddr) -> Result<ZooKeeper, Error> {
+        let stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .whatever_context("connect failed")?;
+        self.handshake(*addr, stream, None).await
     }
 
     /// Set the ZooKeeper [session expiry
@@ -296,7 +307,7 @@ impl ZooKeeperBuilder {
         self,
         addr: SocketAddr,
         stream: tokio::net::TcpStream,
-        default_watcher: futures::channel::mpsc::UnboundedSender<WatchedEvent>,
+        default_watcher: Option<futures::channel::mpsc::UnboundedSender<WatchedEvent>>,
     ) -> Result<ZooKeeper, Error> {
         let request = proto::Request::Connect {
             protocol_version: 0,
@@ -327,6 +338,16 @@ impl ZooKeeper {
         addr: &SocketAddr,
     ) -> Result<(Self, impl Stream<Item = WatchedEvent>), Error> {
         ZooKeeperBuilder::default().connect(addr).await
+    }
+
+    /// Connect to a ZooKeeper server instance at the given address with default parameters,
+    /// but without returning a watcher stream.
+    ///
+    /// See [`ZooKeeperBuilder::connect_without_watcher`].
+    pub async fn connect_without_watcher(addr: &SocketAddr) -> Result<Self, Error> {
+        ZooKeeperBuilder::default()
+            .connect_without_watcher(addr)
+            .await
     }
 
     /// Create a node with the given `path` with `data` as its contents.
@@ -756,6 +777,8 @@ mod tests {
     use super::*;
 
     use futures::StreamExt;
+    use std::env;
+    use std::net::ToSocketAddrs;
     use tracing::Level;
 
     fn init_tracing_subscriber() {
@@ -764,12 +787,30 @@ mod tests {
             .try_init();
     }
 
+    // Use environment variables to override default connection otherwise
+    // default to localhost:127.0.0.1:2181
+    fn get_test_zookeeper_addr() -> SocketAddr {
+        let host =
+            env::var("TOKIO_ZOOKEEPER_TEST_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+
+        let port: u16 = env::var("TOKIO_ZOOKEEPER_TEST_PORT")
+            .unwrap_or_else(|_| "2181".to_string())
+            .parse()
+            .expect("TOKIO_ZOOKEEPER_TEST_PORT must be a valid u16");
+
+        format!("{host}:{port}")
+            .to_socket_addrs()
+            .expect("Invalid host:port")
+            .next()
+            .expect("Host resolved but returned no addresses")
+    }
+
     #[tokio::test]
     async fn it_works() {
         init_tracing_subscriber();
         let builder = ZooKeeperBuilder::default();
 
-        let connect_addr = "127.0.0.1:2181".parse().unwrap();
+        let connect_addr = get_test_zookeeper_addr();
         let (zk, w) = builder.connect(&connect_addr).await.unwrap();
         let (exists_w, stat) = zk.with_watcher().exists("/foo").await.unwrap();
         assert_eq!(stat, None);
@@ -875,7 +916,7 @@ mod tests {
 
     #[tokio::test]
     async fn example() {
-        let connect_addr = "127.0.0.1:2181".parse().unwrap();
+        let connect_addr = get_test_zookeeper_addr();
         let (zk, default_watcher) = ZooKeeper::connect(&connect_addr).await.unwrap();
 
         // let's first check if /example exists. the .watch() causes us to be notified
@@ -960,10 +1001,9 @@ mod tests {
     async fn acl_test() {
         init_tracing_subscriber();
         let builder = ZooKeeperBuilder::default();
+        let connect_addr = get_test_zookeeper_addr();
 
-        let (zk, _) = (builder.connect(&"127.0.0.1:2181".parse().unwrap()))
-            .await
-            .unwrap();
+        let (zk, _) = (builder.connect(&connect_addr)).await.unwrap();
         let _ = zk
             .create(
                 "/acl_test",
@@ -1023,11 +1063,9 @@ mod tests {
             }
             Result::<_, Error>::Ok(res)
         }
+        let connect_addr = get_test_zookeeper_addr();
 
-        let (zk, _) = builder
-            .connect(&"127.0.0.1:2181".parse().unwrap())
-            .await
-            .unwrap();
+        let (zk, _) = builder.connect(&connect_addr).await.unwrap();
 
         let res = zk
             .multi()
@@ -1132,6 +1170,30 @@ mod tests {
 
         let res = check_exists(&zk, &["/a", "/b", "/c", "/d"]).await.unwrap();
         assert_eq!(res, [false, false, false, false]);
+
+        drop(zk); // make Packetizer idle
+    }
+
+    #[tokio::test]
+    async fn connect_without_watcher_test() {
+        init_tracing_subscriber();
+        let connect_addr = get_test_zookeeper_addr();
+
+        let zk = ZooKeeper::connect_without_watcher(&connect_addr).await.unwrap();
+
+        let path = zk
+            .create(
+                "/no_watcher_test",
+                &b"Hello world"[..],
+                Acl::open_unsafe(),
+                CreateMode::Persistent,
+            )
+            .await
+            .unwrap();
+        assert_eq!(path.as_deref(), Ok("/no_watcher_test"));
+
+        let res = zk.delete("/no_watcher_test", None).await.unwrap();
+        assert_eq!(res, Ok(()));
 
         drop(zk); // make Packetizer idle
     }

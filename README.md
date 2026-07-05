@@ -194,6 +194,10 @@ assert_eq!(
 
 # Testing
 
+You can set the address and port of the test instance using `TOKIO_ZOOKEEPER_TEST_HOST` and `TOKIO_ZOOKEEPER_TEST_PORT` respectively. 
+
+The the default is `127.0.0.1:2181`.
+
 1. Start a Zookeeper instance, e.g. using `docker run -p 2181:2181 zookeeper`
 2. Run `cargo test`
 
