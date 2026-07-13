@@ -194,12 +194,14 @@
 #![deny(missing_copy_implementations)]
 
 use error::Error;
-use futures::{channel::oneshot, Stream};
-use snafu::{whatever as bail, ResultExt};
+use futures::{Stream, channel::oneshot};
+use rand::rng;
+use rand::seq::SliceRandom;
+use snafu::{whatever as bail, whatever};
 use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::time;
-use tracing::{debug, instrument, trace};
+use tracing::{debug, instrument, trace, warn};
 
 /// Per-operation ZooKeeper error types.
 pub mod error;
@@ -265,7 +267,7 @@ impl Default for ZooKeeperBuilder {
 }
 
 impl ZooKeeperBuilder {
-    /// Connect to a ZooKeeper server instance at the given address.
+    /// Connect to a ZooKeeper server instance from the given quorum of addresses.
     ///
     /// A `ZooKeeper` instance is returned, along with a "watcher" that will provide notifications
     /// of any changes in state.
@@ -275,13 +277,19 @@ impl ZooKeeperBuilder {
     /// during a disconnect may fail and have to be retried.
     pub async fn connect(
         self,
-        addr: &SocketAddr,
+        mut addrs: Vec<SocketAddr>,
     ) -> Result<(ZooKeeper, impl Stream<Item = WatchedEvent>), Error> {
         let (tx, rx) = futures::channel::mpsc::unbounded();
-        let stream = tokio::net::TcpStream::connect(addr)
-            .await
-            .whatever_context("connect failed")?;
-        Ok((self.handshake(*addr, stream, tx).await?, rx))
+        addrs.shuffle(&mut rng());
+        for addr in addrs {
+            match tokio::net::TcpStream::connect(addr).await {
+                Ok(stream) => return Ok((self.handshake(addr, stream, tx).await?, rx)),
+                Err(err) => {
+                    warn!("connection failed on address {}: {}", addr, err);
+                }
+            }
+        }
+        whatever!("Could not connect to any node in quorum")
     }
 
     /// Set the ZooKeeper [session expiry
@@ -324,9 +332,9 @@ impl ZooKeeper {
     ///
     /// See [`ZooKeeperBuilder::connect`].
     pub async fn connect(
-        addr: &SocketAddr,
+        addrs: Vec<SocketAddr>,
     ) -> Result<(Self, impl Stream<Item = WatchedEvent>), Error> {
-        ZooKeeperBuilder::default().connect(addr).await
+        ZooKeeperBuilder::default().connect(addrs).await
     }
 
     /// Create a node with the given `path` with `data` as its contents.
@@ -769,8 +777,8 @@ mod tests {
         init_tracing_subscriber();
         let builder = ZooKeeperBuilder::default();
 
-        let connect_addr = "127.0.0.1:2181".parse().unwrap();
-        let (zk, w) = builder.connect(&connect_addr).await.unwrap();
+        let connect_addr: Vec<SocketAddr> = vec!["127.0.0.1:2181".parse().unwrap()];
+        let (zk, w) = builder.connect(connect_addr).await.unwrap();
         let (exists_w, stat) = zk.with_watcher().exists("/foo").await.unwrap();
         assert_eq!(stat, None);
         let stat = zk.watch().exists("/foo").await.unwrap();
@@ -875,8 +883,8 @@ mod tests {
 
     #[tokio::test]
     async fn example() {
-        let connect_addr = "127.0.0.1:2181".parse().unwrap();
-        let (zk, default_watcher) = ZooKeeper::connect(&connect_addr).await.unwrap();
+        let connect_addr: Vec<SocketAddr> = vec!["127.0.0.1:2181".parse().unwrap()];
+        let (zk, default_watcher) = ZooKeeper::connect(connect_addr).await.unwrap();
 
         // let's first check if /example exists. the .watch() causes us to be notified
         // the next time the "exists" status of /example changes after the call.
@@ -960,10 +968,9 @@ mod tests {
     async fn acl_test() {
         init_tracing_subscriber();
         let builder = ZooKeeperBuilder::default();
+        let connect_addr: Vec<SocketAddr> = vec!["127.0.0.1:2181".parse().unwrap()];
 
-        let (zk, _) = (builder.connect(&"127.0.0.1:2181".parse().unwrap()))
-            .await
-            .unwrap();
+        let (zk, _) = (builder.connect(connect_addr)).await.unwrap();
         let _ = zk
             .create(
                 "/acl_test",
@@ -1024,10 +1031,8 @@ mod tests {
             Result::<_, Error>::Ok(res)
         }
 
-        let (zk, _) = builder
-            .connect(&"127.0.0.1:2181".parse().unwrap())
-            .await
-            .unwrap();
+        let connect_addr: Vec<SocketAddr> = vec!["127.0.0.1:2181".parse().unwrap()];
+        let (zk, _) = builder.connect(connect_addr).await.unwrap();
 
         let res = zk
             .multi()

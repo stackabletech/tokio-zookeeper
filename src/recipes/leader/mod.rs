@@ -449,6 +449,7 @@ async fn get_children(
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
     use std::time::Duration;
 
     use super::*;
@@ -481,11 +482,11 @@ mod tests {
     #[tokio::test]
     async fn election_works() {
         let builder = ZooKeeperBuilder::default();
-        let connect_addr = "127.0.0.1:2181".parse().unwrap();
+        let connect_addr: Vec<SocketAddr> = vec!["127.0.0.1:2181".parse().unwrap()];
 
         init_tracing_subscriber();
 
-        let (zk1, _w) = builder.connect(&connect_addr).await.unwrap();
+        let (zk1, _w) = builder.connect(connect_addr.clone()).await.unwrap();
         create_election_node(&zk1).await;
         let leader_election1 = LeaderElection::new(zk1, "/election", Acl::open_unsafe().to_vec());
         let (mut rx1, jh1) = leader_election1.volunteer().await.unwrap();
@@ -493,7 +494,7 @@ mod tests {
             .await
             .expect("the first participant should be the leader");
 
-        let (zk2, _w) = builder.connect(&connect_addr).await.unwrap();
+        let (zk2, _w) = builder.connect(connect_addr).await.unwrap();
         let leader_election2 = LeaderElection::new(zk2, "/election", Acl::open_unsafe().to_vec());
         let (mut rx2, _jh2) = leader_election2.volunteer().await.unwrap();
 
