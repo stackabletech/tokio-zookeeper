@@ -30,3 +30,22 @@ impl ZooKeeperTransport for tokio::net::TcpStream {
         tokio::net::TcpStream::connect(addr).await
     }
 }
+
+/// mTLS transport (spike). The `ClientConfig` and `ServerName` live in [`Self::Addr`] because the
+/// [`Packetizer`] re-invokes [`ZooKeeperTransport::connect`] with the stored `Addr` on every
+/// reconnect — there is nowhere else to thread them through.
+impl ZooKeeperTransport for tokio_rustls::client::TlsStream<tokio::net::TcpStream> {
+    type Addr = (
+        SocketAddr,
+        std::sync::Arc<tokio_rustls::rustls::ClientConfig>,
+        tokio_rustls::rustls::pki_types::ServerName<'static>,
+    );
+    type ConnectError = tokio::io::Error;
+    async fn connect(addr: Self::Addr) -> Result<Self, Self::ConnectError> {
+        let (socket_addr, config, server_name) = addr;
+        let tcp = tokio::net::TcpStream::connect(socket_addr).await?;
+        tokio_rustls::TlsConnector::from(config)
+            .connect(server_name, tcp)
+            .await
+    }
+}

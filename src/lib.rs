@@ -281,7 +281,34 @@ impl ZooKeeperBuilder {
         let stream = tokio::net::TcpStream::connect(addr)
             .await
             .whatever_context("connect failed")?;
-        Ok((self.handshake(*addr, stream, tx).await?, rx))
+        Ok((
+            self.handshake::<tokio::net::TcpStream>(*addr, stream, tx)
+                .await?,
+            rx,
+        ))
+    }
+
+    /// Connect to a ZooKeeper server instance using mutual TLS (spike).
+    ///
+    /// `config` must carry the client certificate chain and private key (built by the caller, e.g.
+    /// from a secret-operator-mounted credential). `server_name` is used for SNI and server
+    /// certificate verification. Reconnects reuse the same `config`/`server_name`.
+    pub async fn connect_tls(
+        self,
+        addr: &SocketAddr,
+        config: std::sync::Arc<tokio_rustls::rustls::ClientConfig>,
+        server_name: tokio_rustls::rustls::pki_types::ServerName<'static>,
+    ) -> Result<(ZooKeeper, impl Stream<Item = WatchedEvent>), Error> {
+        use proto::ZooKeeperTransport as _;
+
+        type TlsTransport = tokio_rustls::client::TlsStream<tokio::net::TcpStream>;
+
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        let zk_addr = (*addr, config, server_name);
+        let stream = TlsTransport::connect(zk_addr.clone())
+            .await
+            .whatever_context("tls connect failed")?;
+        Ok((self.handshake::<TlsTransport>(zk_addr, stream, tx).await?, rx))
     }
 
     /// Set the ZooKeeper [session expiry
@@ -292,12 +319,15 @@ impl ZooKeeperBuilder {
         self.session_timeout = t;
     }
 
-    async fn handshake(
+    async fn handshake<S>(
         self,
-        addr: SocketAddr,
-        stream: tokio::net::TcpStream,
+        addr: S::Addr,
+        stream: S,
         default_watcher: futures::channel::mpsc::UnboundedSender<WatchedEvent>,
-    ) -> Result<ZooKeeper, Error> {
+    ) -> Result<ZooKeeper, Error>
+    where
+        S: proto::ZooKeeperTransport,
+    {
         let request = proto::Request::Connect {
             protocol_version: 0,
             last_zxid_seen: 0,
